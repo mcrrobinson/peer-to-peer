@@ -21,6 +21,15 @@ struct CaptureConfig {
     Format format = Format::Auto; // Auto: NV12 if it supports the fps, else MJPEG
 };
 
+struct ScreenConfig {
+    enum class Mode { Text, Motion };
+    Mode mode = Mode::Text;
+    int maxFps = 30;          // text: 30, motion: 60
+    int maxWidth = 3840;      // larger captures are scaled down to fit
+    int maxHeight = 2160;
+    QString restoreTokenFile; // portal restore token (skip the picker next time); empty = don't persist
+};
+
 // Produces NV12 frames on its own thread. The callback runs on that thread
 // and may take a while (it encodes); sources drop stale frames rather than
 // queueing them.
@@ -32,10 +41,21 @@ public:
     virtual void stop() = 0;
     virtual QString description() const = 0;
     virtual int fps() const = 0;
+    // Deliver the current picture again soon even if nothing changed (a
+    // screen that only produces frames on damage; keyframe requests).
+    virtual void requestFrame() {}
 };
 
 // V4L2 camera (Linux). macOS AVFoundation capture arrives with the macOS port.
 std::unique_ptr<VideoSource> createCameraSource(const CaptureConfig& cfg);
+
+// Screen capture: xdg-desktop-portal ScreenCast + PipeWire (Linux); the
+// macOS port adds ScreenCaptureKit. start() returns at once: the user
+// picks a screen or window in the portal dialog and frames follow. Must be
+// created, started and stopped on a thread with a Qt event loop (D-Bus).
+// |onEnded| runs (any thread) when sharing stops by itself: the dialog was
+// cancelled, the user stopped it from the desktop, or the stream failed.
+std::unique_ptr<VideoSource> createScreenSource(const ScreenConfig& cfg, std::function<void(QString)> onEnded);
 
 // Synthetic moving picture with the frame number encoded in a row of
 // black/white blocks so the receiver can verify what it decoded.

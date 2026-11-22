@@ -101,15 +101,36 @@ Congestion control (phase 6), in `MediaTransport` because it sees every packet:
       Simulated-link unit tests: 6 Mbps link → 92% utilisation, ~5 ms mean queue; L4S ~77%.
       **Open:** (a) start-at-max into a slow link costs ~1 s of heavy loss + a few PLIs at call
       start; (b) every rung change is an IDR because FFmpeg won't retarget the encoder live — a
-      native VA-API encoder (phase 9) would allow continuous rate changes; (c) audio and feedback bypass the pacer; (d) under `netem.sh on bottleneck`
-      (4 Mbit/s shared, both directions) the rate saw-tooths between steps (~1 switch / 2 s, each an
-      IDR); proposed fix: back off further step-up probes after a failed one.
+      native VA-API encoder (phase 9) would allow continuous rate changes; (c) audio and feedback bypass the pacer; (d) rung stepping on a tight link: a
+      failed step up now returns exactly one rung and that rung isn't retried for 10 s (doubling to
+      80 s); for 3 s after, only a budget < 70% of the rung drops further. Most remaining switches
+      are the start-up ramp (start-at-max, see (a)). (e) Fixed: the pacer had no age limit, so after
+      a start-up overload pre-congestion frames + NACK resends could keep it seconds behind while
+      every new frame was skipped (seen ~1 in 8 runs). Now paced packets older than 200 ms are
+      dropped; a NACK item is resent only if it fits under the frame-skip backlog (1.5 frame
+      intervals) and its frame is < 500 ms old. A second cause on the receiver: after a loss the
+      assembler accepted (and could re-show / NACK) frames it had already released; it now keeps a
+      floor at the lost frame (test `neverResyncsOnOldFramesAfterLoss`). 10/10 runs clean.
+      **Still open:** (f) the receiver's NACK retry spacing and grace use the control-channel RTT
+      (~0.25 ms on loopback), not the media srtt that includes pacer/bottleneck queues, so on a
+      queued link retries fire before a resend can arrive (only ~1/3–1/2 of resends useful);
+      (g) at the 300 kbps floor rung on a ~600 kbps link, loss-driven auto-FEC (up to 50%) plus
+      audio overflows the link and the call sits at ~50% loss.
       Verified with real netem `bottleneck` + GUI (camera 1080p60 one way, pattern back):
       `--cc off` → 87–90% loss, video ~1 frame / 30 s, 0.4–1 s latency, ~40% audio concealed;
       `--cc on` → 59 fps both ways, p95 40–75 ms, audio <1% concealed, ~58 ms.
-- [ ] **7 Screen share** — **next.** PipeWire + xdg-desktop-portal capture (DMA-BUF), second stream
-      (`kScreen`), "text" mode (full res, 5–30 fps, sharp) vs "motion" (60 fps), viewer UI.
-      Negotiation already picks a codec per stream for screen.
+- [x] **7 Screen share** — xdg-desktop-portal ScreenCast over QtDBus (monitor or window, embedded
+      cursor, restore token per instance so later shares skip the picker) → PipeWire stream
+      (BGRx/RGBx SHM) → swscale to NV12 BT.709 (`screen_capture_pipewire.cpp`). Second send/recv
+      stream on `kScreen` (hub `remote-screen`), started/stopped mid-call with the control message
+      `screen {on, mode}`. Idle screens repeat the last frame every 1 s, or at once on PLI. Text
+      mode: up to 4K, ≤30 fps, ladder sized for 10 fps so it keeps resolution; motion: ≤1080p60.
+      While camera and screen both send, the screen gets 65% of the video budget; the CC max
+      includes `--screen-bitrate` (default 10 Mbps). UI: share button + mode, remote screen on
+      stage with the remote camera as a tile. Ends cleanly on picker cancel, GNOME's stop control,
+      or hangup. Test `screenShareStartsStopsAndRestarts` (1080p pattern source). Verified in the
+      GUI on GNOME Wayland (1920x1080 via the portal, both directions).
+      **Deferred:** DMA-BUF zero-copy capture → phase 9 (SHM + swscale for now).
 - [ ] **8 AV1 + negotiation matrix** — SVT-AV1 RTC preset with screen-content tools, dav1d,
       hardware AV1 where present; exercise every encoder/decoder pairing end to end.
 - [ ] **9 Latency work** — sub-frame slice send, zero-copy (V4L2/DMA-BUF→VA-API, VA-API→RHI),

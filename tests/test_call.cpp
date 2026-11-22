@@ -55,6 +55,13 @@ std::unique_ptr<CallController> makePeer(const QString& name, bool autoAccept, M
     o.mediaConfig.video.nack = imp.nack;
     o.mediaConfig.linkSim = imp.link;
     o.mediaConfig.video.congestionControl = imp.cc;
+    // Screen share from a synthetic source too (never the portal in tests).
+    o.mediaConfig.screen = o.mediaConfig.video;
+    o.mediaConfig.screen.fallbackToPattern = false;
+    o.mediaConfig.screen.capture.width = 1920;
+    o.mediaConfig.screen.capture.height = 1080;
+    o.mediaConfig.screen.capture.fps = 15;
+    o.mediaConfig.screen.bitrateKbps = 6000;
     auto c = std::make_unique<CallController>(o);
     if (!c->start()) return nullptr;
     return c;
@@ -323,6 +330,53 @@ private slots:
         QCOMPARE(tx.framesSkipped, 0u);
         QCOMPARE(tx.keyframes, 1u);
         QCOMPARE(rx.assembler.nacked, 0u);
+    }
+
+    void screenShareStartsStopsAndRestarts()
+    {
+        auto a = makePeer("alice", false), b = makePeer("bob", true);
+        a->callAddress(addrOf(*b));
+        QTRY_COMPARE(b->state(), State::InCall);
+        QTRY_VERIFY(a->canShareScreen());
+        QVERIFY(!b->remoteSharingScreen());
+
+        a->startScreenShare("text");
+        QVERIFY(a->sharingScreen());
+        QCOMPARE(a->screenMode(), QStringLiteral("text"));
+        QTRY_VERIFY(b->remoteSharingScreen());
+        QTRY_VERIFY_WITH_TIMEOUT(b->mediaSession()->screenRecvStats()->decoded >= 30, 10000);
+        auto rx = *b->mediaSession()->screenRecvStats();
+        const auto tx = *a->mediaSession()->screenSendStats();
+        qInfo("screen: %s %dx%d -> decoded %llu, latency avg %.1f p95 %.1f ms, rung %d kbps",
+              qPrintable(tx.encoder), rx.width, rx.height, (unsigned long long)rx.decoded, rx.latencyAvgMs,
+              rx.latencyP95Ms, tx.rungKbps);
+        QCOMPARE(rx.width, 1920);
+        QCOMPARE(rx.height, 1080);
+        QCOMPARE(rx.patternBad, 0u);
+        QCOMPARE(rx.decodeErrors, 0u);
+        // The camera keeps flowing alongside.
+        const auto cam0 = b->mediaSession()->videoRecvStats()->decoded;
+        QTRY_VERIFY(b->mediaSession()->videoRecvStats()->decoded > cam0 + 15);
+
+        a->stopScreenShare();
+        QVERIFY(!a->sharingScreen());
+        QTRY_VERIFY(!b->remoteSharingScreen());
+        const auto stopped = b->mediaSession()->screenRecvStats()->decoded;
+        QTest::qWait(500);
+        QVERIFY(b->mediaSession()->screenRecvStats()->decoded <= stopped + 1);
+
+        // Share again in the same call, in motion mode.
+        a->startScreenShare("motion");
+        QTRY_VERIFY(b->remoteSharingScreen());
+        QTRY_VERIFY_WITH_TIMEOUT(b->mediaSession()->screenRecvStats()->decoded >= stopped + 30, 10000);
+        rx = *b->mediaSession()->screenRecvStats();
+        QCOMPARE(rx.patternBad, 0u);
+        QCOMPARE(rx.decodeErrors, 0u);
+
+        a->hangup();
+        QTRY_COMPARE(b->state(), State::Idle);
+        QVERIFY(!a->sharingScreen());
+        QVERIFY(!b->remoteSharingScreen());
     }
 
     void audioProcessingTogglesApplyLive()

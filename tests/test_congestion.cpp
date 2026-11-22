@@ -350,6 +350,45 @@ private slots:
         QVERIFY(!s.update(next * 1.05, t + 5'000'000));
         QCOMPARE(s.switches(), 3u);
     }
+
+    void selectorBacksOffFailedProbes()
+    {
+        RungSelector s(buildLadder(8000, 300, 1280, 720, 30)); // 8000, 5600, 3920, 2744, 1921, 1345, ...
+        int64_t t = 1'000'000;
+        auto feed = [&](double kbps, int64_t forUs) {
+            for (int64_t end = t + forUs; t < end; t += 33'000) s.update(kbps, t);
+        };
+        feed(1500, 2'000'000); // settle on 1345
+        QCOMPARE(s.rung().kbps, 1345);
+        const auto good = s.index();
+        // Room appears: probe 1921 after 2 s.
+        feed(2200, 2'100'000);
+        QCOMPARE(s.rung().kbps, 1921);
+        // The probe overloads the link; the controller's cut overshoots to
+        // 1000 for a moment (< 0.8 x 1345 but not severe): back to 1345 only.
+        feed(1000, 1'000'000);
+        QCOMPARE(s.index(), good);
+        QCOMPARE(s.failedProbes(), 1u);
+        // Room again right away: no retry of 1921 for 10 s.
+        feed(2200, 9'000'000);
+        QCOMPARE(s.rung().kbps, 1345);
+        feed(2200, 3'500'000);
+        QCOMPARE(s.rung().kbps, 1921); // retried after the 10 s hold + the usual 2 s of room
+        // Fails again: now held for 20 s.
+        feed(1000, 500'000);
+        QCOMPARE(s.index(), good);
+        feed(2200, 15'000'000);
+        QCOMPARE(s.rung().kbps, 1345);
+        feed(2200, 8'000'000);
+        QCOMPARE(s.rung().kbps, 1921);
+        // This time it holds for 10 s: success, later probes higher are allowed.
+        feed(2200, 10'500'000);
+        QCOMPARE(s.rung().kbps, 1921);
+        QCOMPARE(s.failedProbes(), 2u);
+        // A severe drop still goes straight down past the previous rung.
+        feed(400, 300'000);
+        QVERIFY(s.rung().kbps <= 400);
+    }
 };
 
 QTEST_GUILESS_MAIN(TestCongestion)

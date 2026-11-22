@@ -15,12 +15,15 @@
 namespace p2p::app {
 
 // Media plane for one call: the encrypted UDP transport, the audio
-// pipeline, and the camera video send/receive streams.
+// pipeline, and the camera and screen video send/receive streams. The
+// screen streams exist for the whole call (so their transport handlers are
+// fixed before the transport starts) but only send while sharing.
 class MediaSession {
 public:
     struct Config {
         audio::AudioPipeline::Config audio;
         video::VideoStreamConfig video;
+        video::VideoStreamConfig screen; // source Screen (portal) or Pattern (tests); capture.* sizes the pattern
         double simulatedLoss = 0.0; // fraction of outgoing packets to drop (testing)
         double simulatedBurst = 1.0; // mean loss burst length in packets (testing)
         net::MediaTransport::LinkSim linkSim; // simulated bottleneck on outgoing media (testing)
@@ -36,8 +39,19 @@ public:
     // (nullopt = no video that way).
     bool start(const crypto::SessionKeys& keys, const QHostAddress& remote, uint16_t remotePort,
                const std::optional<media::StreamSelection>& sendCamera,
-               const std::optional<media::StreamSelection>& recvCamera, QString* error);
+               const std::optional<media::StreamSelection>& recvCamera,
+               const std::optional<media::StreamSelection>& sendScreen,
+               const std::optional<media::StreamSelection>& recvScreen, QString* error);
     void stop();
+
+    // Screen sharing (call on the Qt thread). |onEnded| runs on any thread
+    // when the source stops by itself (portal cancelled, stopped from the
+    // desktop); call stopScreen() afterwards.
+    bool canShareScreen() const { return bool(screenSend_); }
+    bool startScreen(video::ScreenConfig::Mode mode, std::function<void(QString)> onEnded, QString* error);
+    void stopScreen();
+    bool sharingScreen() const { return screenSend_ && screenSend_->running(); }
+    void clearRemoteScreen(); // the peer stopped sharing
 
     void setClockOffsetUs(int64_t us);
     void setRttUs(int64_t us);
@@ -50,6 +64,8 @@ public:
     net::MediaTransport::Stats transportStats() const { return transport_.stats(); }
     std::optional<video::VideoSendStream::Stats> videoSendStats() const;
     std::optional<video::VideoReceiveStream::Stats> videoRecvStats() const;
+    std::optional<video::VideoSendStream::Stats> screenSendStats() const;
+    std::optional<video::VideoReceiveStream::Stats> screenRecvStats() const;
 
 private:
     Config cfg_;
@@ -57,6 +73,10 @@ private:
     std::unique_ptr<audio::AudioPipeline> audio_;
     std::unique_ptr<video::VideoSendStream> videoSend_;
     std::unique_ptr<video::VideoReceiveStream> videoRecv_;
+    std::unique_ptr<video::VideoSendStream> screenSend_;
+    std::unique_ptr<video::VideoReceiveStream> screenRecv_;
+    std::function<void(QString)> screenEnded_;
+    void updateBudgetShares();
     bool started_ = false;
 };
 

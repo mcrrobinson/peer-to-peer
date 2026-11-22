@@ -7,7 +7,7 @@ set(CMAKE_EXPORT_COMPILE_COMMANDS ON)
 
 option(P2P_BUILD_TESTS "Build unit tests" ON)
 
-find_package(Qt6 6.7 REQUIRED COMPONENTS Core Network Gui Quick ShaderTools Test)
+find_package(Qt6 6.7 REQUIRED COMPONENTS Core Network DBus Gui Quick ShaderTools Test)
 qt_standard_project_setup(REQUIRES 6.7)
 
 find_package(PkgConfig REQUIRED)
@@ -86,11 +86,17 @@ endif()
 
 if(CMAKE_SYSTEM_NAME STREQUAL "Linux")
     pkg_check_modules(LIBVA REQUIRED IMPORTED_TARGET libva libva-drm)
-    target_sources(p2pcore PRIVATE src/video/codec_probe_linux.cpp src/video/camera_v4l2.cpp)
-    target_link_libraries(p2pcore PRIVATE PkgConfig::LIBVA)
+    pkg_check_modules(PIPEWIRE REQUIRED IMPORTED_TARGET libpipewire-0.3)
+    target_sources(p2pcore PRIVATE src/video/codec_probe_linux.cpp src/video/camera_v4l2.cpp
+                                   src/video/screen_capture_pipewire.cpp)
+    target_link_libraries(p2pcore PRIVATE PkgConfig::LIBVA PkgConfig::PIPEWIRE Qt6::DBus)
+    # SPA's C headers use designated initialisers and casts g++ warns about.
+    set_source_files_properties(src/video/screen_capture_pipewire.cpp PROPERTIES COMPILE_OPTIONS
+        "-Wno-missing-field-initializers;-Wno-pedantic")
 else()
     # macOS VideoToolbox probe arrives in the macOS port phase.
-    target_sources(p2pcore PRIVATE src/video/codec_probe_generic.cpp src/video/camera_none.cpp)
+    target_sources(p2pcore PRIVATE src/video/codec_probe_generic.cpp src/video/camera_none.cpp
+                                   src/video/screen_none.cpp)
 endif()
 
 # ---------------------------------------------------------------------------

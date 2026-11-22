@@ -139,7 +139,7 @@ void FrameAssembler::insert(const FragmentHeader& h, const uint8_t* data, size_t
     ++st_.fragments;
     if (h.flags & FragmentHeader::kRetransmit) ++st_.retransmitsReceived;
     if (h.isParity()) ++st_.parityReceived;
-    if (haveNext_ && int32_t(h.frameId - nextId_) < 0) {
+    if ((haveNext_ || haveFloor_) && int32_t(h.frameId - nextId_) < 0) {
         ++st_.lateFragments;
         return;
     }
@@ -336,6 +336,8 @@ std::vector<AssembledFrame> FrameAssembler::poll(int64_t nowUs)
                 haveNext_ = false; // need a keyframe
                 gapSinceUs_ = -1;
                 dropBefore(nextId_ + 1);
+                ++nextId_; // never resync on (or accept) anything at or before the lost frame
+                haveFloor_ = true;
                 continue;
             }
         }

@@ -31,6 +31,7 @@ constexpr size_t kIpUdpOverhead = 28;
 constexpr int64_t kFeedbackIntervalUs = 10'000;
 constexpr size_t kFeedbackEarlyPackets = 200;
 constexpr int64_t kPacerBurstUs = 1'000; // credit a late pacer may catch up on
+constexpr int64_t kPacerMaxAgeUs = 200'000;
 
 void putU64(uint8_t* p, uint64_t v)
 {
@@ -217,6 +218,7 @@ bool MediaTransport::sendPaced(uint8_t type, uint8_t streamId, const uint8_t* pa
             return transmit(type, streamId, payload, len);
         }
         Queued& q = pacerQueue_.emplace_back();
+        q.queuedUs = nowUs();
         q.type = type;
         q.stream = streamId;
         q.len = uint16_t(len);
@@ -238,6 +240,10 @@ void MediaTransport::pacerLoop()
             q = pacerQueue_.front();
             pacerQueue_.pop_front();
             pacerBytes_ -= q.len;
+        }
+        if (nowUs() - q.queuedUs > kPacerMaxAgeUs) {
+            st_.pacerDropped.fetch_add(1, std::memory_order_relaxed);
+            continue;
         }
         const int64_t rate = pacingBps_.load(std::memory_order_relaxed);
         if (rate > 0) {
@@ -489,7 +495,8 @@ MediaTransport::Stats MediaTransport::stats() const
     return {r(st_.packetsSent),     r(st_.bytesSent),    r(st_.sendErrors), r(st_.simDropped),
             r(st_.packetsReceived), r(st_.bytesReceived), r(st_.authFailures), r(st_.replays),
             r(st_.malformed),       first ? highest - first + 1 : 0,
-            r(st_.feedbackSent),    r(st_.feedbackReceived), r(st_.ceReceived), r(st_.simQueueDrops)};
+            r(st_.feedbackSent),    r(st_.feedbackReceived), r(st_.ceReceived), r(st_.simQueueDrops),
+            r(st_.pacerDropped)};
 }
 
 bool MediaTransport::simulateDrop()

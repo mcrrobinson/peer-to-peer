@@ -63,7 +63,9 @@ private:
 // logged on send, the peer's feedback updates the controller, and video
 // reads the target rate. sendPaced() goes through a pacer that is only
 // active while the controller sees the link as the bottleneck; otherwise
-// it sends immediately like send().
+// it sends immediately like send(). Packets that waited longer than 200 ms
+// in the pacer are dropped: the receiver has given up (or is about to give
+// up) on their frame, and sending them would only add delay.
 class MediaTransport {
 public:
     using Handler = std::function<void(const uint8_t* payload, size_t len, int64_t arrivalUs)>;
@@ -75,6 +77,7 @@ public:
         // (highest - first + 1); with packetsReceived this gives path loss.
         uint64_t packetsExpected = 0;
         uint64_t feedbackSent = 0, feedbackReceived = 0, ceReceived = 0, simQueueDrops = 0;
+        uint64_t pacerDropped = 0; // waited too long in the pacer to be of use
     };
     // Testing: a bottleneck on our outgoing packets: drop-tail queue drained
     // at |rateBps| (0 = unlimited), then |delayUs| of propagation; packets
@@ -130,6 +133,7 @@ public:
 private:
     static constexpr size_t kMaxDatagram = wire::kHeaderSize + wire::kMaxPayload + wire::kTagSize;
     struct Queued {
+        int64_t queuedUs = 0;
         uint8_t type = 0, stream = 0;
         uint16_t len = 0;
         uint8_t data[wire::kMaxPayload];
@@ -195,6 +199,7 @@ private:
         std::atomic<uint64_t> packetsSent{0}, bytesSent{0}, sendErrors{0}, simDropped{0};
         std::atomic<uint64_t> packetsReceived{0}, bytesReceived{0}, authFailures{0}, replays{0}, malformed{0};
         std::atomic<uint64_t> feedbackSent{0}, feedbackReceived{0}, ceReceived{0}, simQueueDrops{0};
+        std::atomic<uint64_t> pacerDropped{0};
     } st_;
 };
 

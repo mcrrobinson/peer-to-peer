@@ -24,6 +24,7 @@ constexpr int64_t kPathLossIntervalUs = 200'000;
 constexpr int64_t kHistoryUs = 1'000'000;
 constexpr size_t kHistoryMaxBytes = 32u << 20;
 constexpr size_t kNackEntry = 6;
+constexpr int64_t kResendMaxAgeUs = 500'000; // receiver grace is <= 300 ms + RTT
 
 void putU16(uint8_t* p, uint16_t v) { p[0] = uint8_t(v >> 8); p[1] = uint8_t(v); }
 void putU32(uint8_t* p, uint32_t v) { putU16(p, uint16_t(v >> 16)); putU16(p + 2, uint16_t(v)); }
@@ -82,6 +83,11 @@ void VideoSendStream::onFeedback(const uint8_t* d, size_t n)
     switch (VideoFeedback(d[0])) {
     case VideoFeedback::PictureLoss: {
         forceKeyframe_ = true;
+        {
+            // A screen may be idle (no new frames): ask for one to carry the keyframe.
+            std::lock_guard sl(sourceMutex_);
+            if (source_) source_->requestFrame();
+        }
         std::lock_guard l(statsMutex_);
         ++st_.pliReceived;
         return;
@@ -95,7 +101,17 @@ void VideoSendStream::onFeedback(const uint8_t* d, size_t n)
                 const uint16_t index = getU16(d + off + 4);
                 ++items;
                 auto it = std::find_if(history_.begin(), history_.end(), [&](const SentFrame& f) { return f.id == id; });
-                if (it == history_.end()) {
+                // History is pruned only when a frame is encoded, so while
+                // frames are skipped check the age here too.
+                if (it == history_.end() || nowUs() - it->sentUs > kResendMaxAgeUs) {
+                    ++missed;
+                    continue;
+                }
+                // Resends never push the pacer past the point where new
+                // frames get skipped: fresh video has priority.
+                const size_t bytes = index == NackItem::kWholeFrame ? it->bytes
+                                     : index < it->fragments.size() ? it->fragments[index].size() : 0;
+                if (bytes && !resendFits(bytes)) {
                     ++missed;
                     continue;
                 }
@@ -119,6 +135,13 @@ void VideoSendStream::onFeedback(const uint8_t* d, size_t n)
     }
 }
 
+bool VideoSendStream::resendFits(size_t bytes) const
+{
+    const int64_t rate = transport_.ccStats().pacingBps;
+    if (rate <= 0) return true; // not pacing: goes out right away
+    return transport_.pacerQueueUs() + int64_t(double(bytes) * 8e6 / double(rate)) <= skipQueueUs_.load();
+}
+
 void VideoSendStream::resend(const std::vector<uint8_t>& payload)
 {
     uint8_t buf[2048];
@@ -129,11 +152,22 @@ void VideoSendStream::resend(const std::vector<uint8_t>& payload)
 
 bool VideoSendStream::start(QString* error)
 {
+    if (running_) return true;
+    std::lock_guard sl(sourceMutex_);
+    forceKeyframe_ = true;
     const auto& c = cfg_.capture;
+    auto onFrame = [this](std::shared_ptr<VideoFrame> f) { this->onFrame(std::move(f)); };
+    if (cfg_.source == VideoStreamConfig::Source::Screen) {
+        source_ = createScreenSource(cfg_.screen, cfg_.onSourceEnded);
+        if (!source_->start(onFrame, error)) {
+            source_.reset();
+            return false;
+        }
+    }
     if (cfg_.source == VideoStreamConfig::Source::Camera) {
         source_ = createCameraSource(c);
         QString err;
-        if (!source_->start([this](std::shared_ptr<VideoFrame> f) { onFrame(std::move(f)); }, &err)) {
+        if (!source_->start(onFrame, &err)) {
             if (!cfg_.fallbackToPattern) {
                 if (error) *error = err;
                 return false;
@@ -144,20 +178,25 @@ bool VideoSendStream::start(QString* error)
     }
     if (cfg_.source == VideoStreamConfig::Source::Pattern) {
         source_ = std::make_unique<TestPatternSource>(c.width, c.height, c.fps);
-        if (!source_->start([this](std::shared_ptr<VideoFrame> f) { onFrame(std::move(f)); }, error)) return false;
+        if (!source_->start(onFrame, error)) return false;
     }
     sendingPattern_ = cfg_.source == VideoStreamConfig::Source::Pattern;
     if (source_) {
         std::lock_guard l(statsMutex_);
         st_.source = source_->description();
     }
+    running_ = true;
     return true;
 }
 
 void VideoSendStream::stop()
 {
-    if (source_) source_->stop();
-    source_.reset();
+    {
+        std::lock_guard sl(sourceMutex_);
+        if (source_) source_->stop();
+        source_.reset();
+    }
+    running_ = false;
     FrameHub::instance().clear(previewName_);
 }
 
@@ -220,17 +259,27 @@ void VideoSendStream::onFrame(std::shared_ptr<VideoFrame> f)
     const int64_t now = nowUs();
     lossEstimate_ = transport_.ccStats().lossRate;
 
-    if (!ladder_) {
-        auto rungs = cc ? buildLadder(cfg_.bitrateKbps, cfg_.minBitrateKbps, f->width, f->height, fps)
+    // (Re)build the ladder for this source size: first frame, or a shared
+    // window / screen that changed size.
+    if (!ladder_ || f->width != ladderSrcW_ || f->height != ladderSrcH_) {
+        // Text-mode screen share keeps resolution and gives up frame rate:
+        // size the rungs as if for ~10 fps.
+        const bool text = cfg_.source == VideoStreamConfig::Source::Screen &&
+                          cfg_.screen.mode == ScreenConfig::Mode::Text;
+        auto rungs = cc ? buildLadder(cfg_.bitrateKbps, cfg_.minBitrateKbps, f->width, f->height, text ? 10 : fps)
                         : std::vector<Rung>{{cfg_.bitrateKbps, f->width, f->height}};
         ladder_ = std::make_unique<RungSelector>(std::move(rungs));
+        encoder_.reset();
+        ladderSrcW_ = f->width;
+        ladderSrcH_ = f->height;
         std::lock_guard l(statsMutex_);
         st_.rungCount = int(ladder_->ladder().size());
+        if (source_) st_.source = source_->description();
     }
     if (cc) {
         // What the controller leaves for this encoder: minus audio, minus FEC overhead.
         const double avail = double(transport_.targetBps() - transport_.streamBps(net::wire::kAudio));
-        const double budget = std::max(0.0, avail) / (1.0 + lastFecRate_) / 1000.0;
+        const double budget = std::max(0.0, avail) * share_.load() / (1.0 + lastFecRate_) / 1000.0;
         if (ladder_->update(budget, now)) {
             const auto& r = ladder_->rung();
             qCInfo(lcVideo).noquote() << QStringLiteral("rate ladder -> %1 kbps %2x%3 (budget %4 kbps)")
@@ -246,6 +295,7 @@ void VideoSendStream::onFrame(std::shared_ptr<VideoFrame> f)
             st_.rungSwitches = ladder_->switches();
         }
         // Don't stack frames behind a backed-up pacer: skip this one.
+        skipQueueUs_ = 1'500'000 / fps;
         if (transport_.pacerQueueUs() > 1'500'000 / fps) {
             std::lock_guard l(statsMutex_);
             ++st_.framesSkipped;
@@ -499,8 +549,15 @@ void VideoReceiveStream::decodeLoop()
             latencies_.push_back(latency);
             while (latencies_.size() > kLatencyWindow) latencies_.pop_front();
             if (code) {
-                if (!havePattern_ || *code > lastPattern_) ++st_.patternOk;
-                else ++st_.patternBad;
+                if (resetPattern_.exchange(false)) havePattern_ = false;
+                if (!havePattern_ || *code > lastPattern_) {
+                    ++st_.patternOk;
+                } else {
+                    ++st_.patternBad;
+                    qCWarning(lcVideo) << hubName_ << "pattern out of order: frame" << f.id << "code" << *code
+                                       << "after" << lastPattern_ << (f.keyframe ? "(key)" : "")
+                                       << (f.recovered ? "(recovered)" : "") << out->width << "x" << out->height;
+                }
                 havePattern_ = true;
                 lastPattern_ = *code;
             }

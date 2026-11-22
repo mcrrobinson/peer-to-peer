@@ -352,6 +352,18 @@ void CallController::onMessage(const QJsonObject& msg)
         return;
     }
 
+    if (t == "screen" && state_ == State::InCall) {
+        const bool on = msg.value("on").toBool();
+        if (on == remoteSharing_) return;
+        remoteSharing_ = on;
+        if (!on && media_) media_->clearRemoteScreen();
+        appendLog(on ? QStringLiteral("%1 is sharing their screen (%2)").arg(channel_->remoteName(),
+                                                                             msg.value("mode").toString())
+                     : QStringLiteral("%1 stopped sharing").arg(channel_->remoteName()));
+        emit screenShareChanged();
+        return;
+    }
+
     qCDebug(lcCall) << "ignoring message" << t << "in state" << stateName();
 }
 
@@ -390,10 +402,17 @@ void CallController::startMedia()
         return;
     }
     QString err;
-    std::optional<media::StreamSelection> sendCam, recvCam;
-    if (sendSel_) sendCam = sendSel_->camera;
-    if (recvSel_) recvCam = recvSel_->camera;
-    if (!media_->start(channel_->keys(), channel_->peerAddress(), remoteMediaPort_, sendCam, recvCam, &err)) {
+    std::optional<media::StreamSelection> sendCam, recvCam, sendScreen, recvScreen;
+    if (sendSel_) {
+        sendCam = sendSel_->camera;
+        sendScreen = sendSel_->screen;
+    }
+    if (recvSel_) {
+        recvCam = recvSel_->camera;
+        recvScreen = recvSel_->screen;
+    }
+    if (!media_->start(channel_->keys(), channel_->peerAddress(), remoteMediaPort_, sendCam, recvCam, sendScreen,
+                       recvScreen, &err)) {
         setError(QStringLiteral("media failed to start: %1").arg(err));
         media_.reset();
         return;
@@ -406,6 +425,45 @@ void CallController::startMedia()
                   .arg(channel_->peerAddress().toString())
                   .arg(remoteMediaPort_));
     mediaStatsTimer_.start();
+    emit screenShareChanged(); // canShareScreen
+}
+
+void CallController::startScreenShare(const QString& mode)
+{
+    if (state_ != State::InCall || !media_ || !channel_ || sharingScreen_) return;
+    const bool motion = mode == QLatin1String("motion");
+    QString err;
+    // The source reports its own end (portal cancelled, stopped from the
+    // desktop) from another thread: hop back here.
+    QPointer<CallController> self(this);
+    auto onEnded = [self](QString why) {
+        QMetaObject::invokeMethod(self, [self, why] {
+            if (!self || !self->sharingScreen_) return;
+            self->appendLog(QStringLiteral("screen sharing ended: %1").arg(why));
+            self->stopScreenShare();
+        }, Qt::QueuedConnection);
+    };
+    if (!media_->startScreen(motion ? video::ScreenConfig::Mode::Motion : video::ScreenConfig::Mode::Text, onEnded,
+                             &err)) {
+        setError(QStringLiteral("screen sharing failed: %1").arg(err));
+        return;
+    }
+    sharingScreen_ = true;
+    screenMode_ = motion ? QStringLiteral("motion") : QStringLiteral("text");
+    channel_->send({{"t", "screen"}, {"on", true}, {"mode", screenMode_}});
+    appendLog(QStringLiteral("sharing screen (%1 mode)").arg(screenMode_));
+    emit screenShareChanged();
+}
+
+void CallController::stopScreenShare()
+{
+    if (!sharingScreen_) return;
+    sharingScreen_ = false;
+    screenMode_.clear();
+    if (media_) media_->stopScreen();
+    if (channel_ && channel_->isEstablished()) channel_->send({{"t", "screen"}, {"on", false}});
+    appendLog(QStringLiteral("stopped sharing screen"));
+    emit screenShareChanged();
 }
 
 void CallController::setMicMuted(bool m)
@@ -469,7 +527,11 @@ void CallController::endCall(const QString& reason)
 {
     const bool wasActive = state_ != State::Idle;
     mediaStatsTimer_.stop();
+    const bool hadScreen = sharingScreen_ || remoteSharing_;
+    sharingScreen_ = remoteSharing_ = false;
+    screenMode_.clear();
     media_.reset();
+    if (hadScreen) emit screenShareChanged();
     remoteMediaPort_ = 0;
     mediaStats_.clear();
     emit mediaStatsChanged();

@@ -3,6 +3,8 @@
 #include "video/codec_probe.h"
 
 #include <QCommandLineParser>
+#include <QDir>
+#include <QStandardPaths>
 #include <QCoreApplication>
 #include <QGuiApplication>
 #include <QHostInfo>
@@ -91,9 +93,16 @@ int main(int argc, char** argv)
                                    "100");
     QCommandLineOption simCeOpt("sim-ce", "Simulated L4S marking: CE above this queue delay, ms (0 = off).", "ms",
                                 "0");
+    QCommandLineOption shareScreenOpt("share-screen", "Start sharing the screen when the call connects: text or motion.",
+                                      "mode");
+    QCommandLineOption screenSourceOpt("screen-source",
+                                       "Screen to share: portal (pick a screen/window), pattern (test) or none.", "src",
+                                       "portal");
+    QCommandLineOption screenBitrateOpt("screen-bitrate", "Screen share bitrate in kbps (the maximum with --cc on).",
+                                        "kbps", "10000");
     cli.addOptions({videoSourceOpt, cameraOpt, videoSizeOpt, videoFpsOpt, videoBitrateOpt, cameraFormatOpt, fecOpt,
                     noNackOpt, simBurstOpt, audioFecOpt, ccOpt, minBitrateOpt, simRateOpt, simDelayOpt, simQueueOpt,
-                    simCeOpt});
+                    simCeOpt, shareScreenOpt, screenSourceOpt, screenBitrateOpt});
     cli.process(*app);
 
     if (!p2p::crypto::init()) {
@@ -182,6 +191,30 @@ int main(int argc, char** argv)
     sim.queueUs = int64_t(std::max(1.0, cli.value(simQueueOpt).toDouble()) * 1000);
     sim.ceThresholdUs = int64_t(std::max(0.0, cli.value(simCeOpt).toDouble()) * 1000);
 
+    // Screen share: same transport / recovery settings as the camera.
+    auto& screen = opts.mediaConfig.screen;
+    screen = video;
+    screen.onSourceEnded = nullptr;
+    screen.fallbackToPattern = false;
+    screen.bitrateKbps = std::clamp(cli.value(screenBitrateOpt).toInt(), 300, 200000);
+    const QString ssrc = cli.value(screenSourceOpt);
+    if (ssrc == "portal") screen.source = VSource::Screen;
+    else if (ssrc == "pattern") screen.source = VSource::Pattern; // capture.* gives its size and rate
+    else if (ssrc == "none") screen.source = VSource::None;
+    else {
+        std::fprintf(stderr, "unknown --screen-source %s\n", qPrintable(ssrc));
+        return 1;
+    }
+    // The portal's restore token lets later shares skip the picker.
+    const QString cfgDir = QStandardPaths::writableLocation(QStandardPaths::AppConfigLocation);
+    QDir().mkpath(cfgDir);
+    screen.screen.restoreTokenFile = cfgDir + QStringLiteral("/screencast-token-%1").arg(instance);
+    const QString shareMode = cli.value(shareScreenOpt);
+    if (cli.isSet(shareScreenOpt) && shareMode != "text" && shareMode != "motion") {
+        std::fprintf(stderr, "--share-screen must be text or motion\n");
+        return 1;
+    }
+
     CallController controller(opts);
     const QString av1 = cli.value(preferAv1Opt);
     controller.setPreferAv1Camera(av1 == "camera" || av1 == "both");
@@ -212,6 +245,11 @@ int main(int argc, char** argv)
             std::printf("MEDIA %s\n", qPrintable(QString(controller.mediaStats()).replace('\n', QStringLiteral("\n      "))));
             std::fflush(stdout);
         });
+    }
+
+    if (cli.isSet(shareScreenOpt)) {
+        QObject::connect(&controller, &CallController::callEstablished, &controller,
+                         [&controller, shareMode] { controller.startScreenShare(shareMode); });
     }
 
     if (cli.isSet(exitAfterOpt)) {

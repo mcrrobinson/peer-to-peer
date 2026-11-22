@@ -152,6 +152,32 @@ private slots:
         QCOMPARE(out[0].id, 4u);
     }
 
+    void neverResyncsOnOldFramesAfterLoss()
+    {
+        // Frames 1 (key) .. 3 shown, 4 lost: while waiting for a keyframe, a
+        // late copy of keyframe 1 (a slow resend) must not be shown again,
+        // nor NACKed.
+        FrameAssembler a;
+        auto f1 = split(1, payload(3000, 1), true);
+        feed(a, f1);
+        feed(a, split(2, payload(3000, 2), false));
+        feed(a, split(3, payload(3000, 3), false));
+        QCOMPARE(a.poll(0).size(), size_t(3));
+        feed(a, split(5, payload(3000, 5), false), 1000);
+        a.poll(1000);
+        QVERIFY(a.poll(100'000).empty()); // 4 declared lost
+        QVERIFY(a.needKeyframe());
+        feed(a, {f1[0]}, 100'000);
+        feed(a, f1, 100'000);
+        QVERIFY(a.poll(100'000).empty());
+        QVERIFY(a.collectNacks(150'000, {}).empty());
+
+        feed(a, split(6, payload(3000, 6), true), 200'000);
+        auto out = a.poll(200'000);
+        QCOMPARE(out.size(), size_t(1));
+        QCOMPARE(out[0].id, 6u);
+    }
+
     void laterKeyframeSkipsGapImmediately()
     {
         FrameAssembler a;

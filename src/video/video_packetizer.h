@@ -161,6 +161,7 @@ private:
     std::map<uint32_t, AssembledFrame> ready_;
     std::map<uint32_t, MissingFrame> missing_; // frames with no fragment at all, inside the gap
     bool haveNext_ = false;       // false: waiting for a keyframe
+    bool haveFloor_ = false;      // nextId_ is a floor while resyncing: older frames are history
     uint32_t nextId_ = 0;
     bool haveHighest_ = false;
     uint32_t highestId_ = 0;      // newest frame id seen

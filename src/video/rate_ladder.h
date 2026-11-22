@@ -29,13 +29,19 @@ public:
     //  * down: right away when the budget is < 80% of the current rung,
     //    otherwise once it has been short for 300 ms;
     //  * up: one rung, once the budget covers it with 10% headroom for 2 s,
-    //    and at least 2 s after the last switch.
+    //    and at least 2 s after the last switch. A step up is a probe: if
+    //    the budget falls short within 10 s, go back to the rung we came
+    //    from (not further, unless the budget is below 60% of it) and don't
+    //    retry that rung for 10 s, doubling per consecutive failure up to
+    //    80 s. The controller's cut overshoots while it recovers, so for 3 s
+    //    after a failed probe only a budget below 70% of the rung drops us.
     bool update(double budgetKbps, int64_t nowUs);
 
     int index() const { return cur_; }
     const Rung& rung() const { return ladder_[size_t(cur_)]; }
     const std::vector<Rung>& ladder() const { return ladder_; }
     uint64_t switches() const { return switches_; }
+    uint64_t failedProbes() const { return failedProbes_; }
 
 private:
     int fits(double kbps) const; // best rung with rate <= kbps (or the last)
@@ -44,7 +50,10 @@ private:
     int cur_ = 0;
     int64_t lastSwitchUs_ = 0;
     int64_t shortSinceUs_ = 0, roomSinceUs_ = 0;
-    uint64_t switches_ = 0;
+    uint64_t switches_ = 0, failedProbes_ = 0;
+    bool probing_ = false;
+    int64_t probeStartUs_ = 0, settleUntilUs_ = 0;
+    std::vector<int64_t> holdUntilUs_, backoffUs_; // per rung
 };
 
 } // namespace p2p::video

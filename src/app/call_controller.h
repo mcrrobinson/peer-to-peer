@@ -30,6 +30,7 @@ namespace p2p::app {
 //   invite  {send:{camera,screen}}     initiator, once remote caps are known
 //   accept  {send:{camera,screen}}     responder
 //   reject  {reason}
+//   screen  {on, mode}                 sender started / stopped sharing its screen
 //   hangup  {}
 // Each side chooses what *it* sends, from its encoders and the peer's
 // decoders; the receiver validates that it can decode the choice.
@@ -56,6 +57,10 @@ class CallController : public QObject {
     Q_PROPERTY(bool noiseSuppression READ noiseSuppression WRITE setNoiseSuppression NOTIFY audioProcessingChanged)
     Q_PROPERTY(int noiseLevel READ noiseLevel WRITE setNoiseLevel NOTIFY audioProcessingChanged)
     Q_PROPERTY(bool autoGain READ autoGain WRITE setAutoGain NOTIFY audioProcessingChanged)
+    Q_PROPERTY(bool canShareScreen READ canShareScreen NOTIFY screenShareChanged)
+    Q_PROPERTY(bool sharingScreen READ sharingScreen NOTIFY screenShareChanged)
+    Q_PROPERTY(QString screenMode READ screenMode NOTIFY screenShareChanged)
+    Q_PROPERTY(bool remoteSharingScreen READ remoteSharingScreen NOTIFY screenShareChanged)
 
 public:
     enum class State { Idle, Connecting, Handshaking, Outgoing, Incoming, InCall };
@@ -117,12 +122,19 @@ public:
     void setNoiseLevel(int level);
     void setAutoGain(bool v);
     const MediaSession* mediaSession() const { return media_.get(); }
+    bool canShareScreen() const { return media_ && media_->canShareScreen(); }
+    bool sharingScreen() const { return sharingScreen_; }
+    QString screenMode() const { return screenMode_; }
+    bool remoteSharingScreen() const { return remoteSharing_; }
 
     Q_INVOKABLE void callAddress(const QString& hostPort);
     Q_INVOKABLE void callPeer(const QString& peerId);
     Q_INVOKABLE void accept();
     Q_INVOKABLE void reject();
     Q_INVOKABLE void hangup();
+    // |mode|: "text" (full resolution, up to 30 fps) or "motion" (1080p60).
+    Q_INVOKABLE void startScreenShare(const QString& mode);
+    Q_INVOKABLE void stopScreenShare();
 
 signals:
     void stateChanged();
@@ -137,6 +149,7 @@ signals:
     void mediaStatsChanged();
     void micMutedChanged();
     void audioProcessingChanged();
+    void screenShareChanged();
 
 private:
     void onNewConnection();
@@ -173,6 +186,9 @@ private:
     QTimer mediaStatsTimer_;
     QString mediaStats_;
     bool micMuted_ = false;
+    bool sharingScreen_ = false;
+    bool remoteSharing_ = false;
+    QString screenMode_;
 };
 
 } // namespace p2p::app

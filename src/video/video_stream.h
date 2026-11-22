@@ -25,10 +25,12 @@ class MediaTransport;
 namespace p2p::video {
 
 struct VideoStreamConfig {
-    enum class Source { Camera, Pattern, None };
+    enum class Source { Camera, Pattern, Screen, None };
     enum class Fec { Off, Auto, Fixed };
     Source source = Source::Camera;
-    CaptureConfig capture;
+    CaptureConfig capture;             // camera, and the pattern's size / rate
+    ScreenConfig screen;               // Source::Screen
+    std::function<void(QString)> onSourceEnded; // the screen source stopped by itself
     int bitrateKbps = 12000;       // the maximum with congestion control, else fixed
     int minBitrateKbps = 300;
     bool congestionControl = true; // follow the transport's target via the rate ladder
@@ -74,8 +76,13 @@ public:
     ~VideoSendStream();
 
     void attach();                 // before transport.start()
-    bool start(QString* error);
+    bool start(QString* error);    // may be called again after stop()
     void stop();
+    bool running() const { return running_; }
+    void setScreenConfig(const ScreenConfig& s) { cfg_.screen = s; } // while stopped
+    // Share of the controller's video budget this stream may use (camera
+    // and screen split it while both run).
+    void setBudgetShare(double s) { share_ = s; }
     Stats stats() const;
 
 private:
@@ -88,6 +95,7 @@ private:
     void onFrame(std::shared_ptr<VideoFrame> f);
     void onFeedback(const uint8_t* d, size_t n);
     void resend(const std::vector<uint8_t>& payload);
+    bool resendFits(size_t bytes) const;
     bool openEncoder(const Rung& r, int fps);
     const VideoFrame* scaled(const VideoFrame& f, int w, int h);
 
@@ -97,6 +105,10 @@ private:
     uint8_t streamId_;
     QString previewName_;
     std::unique_ptr<VideoSource> source_;
+    std::mutex sourceMutex_; // source_ vs. keyframe requests from the receive thread
+    std::atomic<bool> running_{false};
+    std::atomic<double> share_{1.0};
+    int ladderSrcW_ = 0, ladderSrcH_ = 0;
     std::unique_ptr<VideoEncoder> encoder_;
     bool encoderFailed_ = false;
     std::unique_ptr<RungSelector> ladder_;
@@ -105,6 +117,7 @@ private:
     double lastFecRate_ = 0;
     uint32_t frameId_ = 0;
     std::atomic<bool> forceKeyframe_{true};
+    std::atomic<int64_t> skipQueueUs_{50'000}; // pacer backlog above which new frames are skipped
     bool sendingPattern_ = false;
     std::atomic<double> lossEstimate_{0.0};
 
@@ -144,6 +157,9 @@ public:
     void stop();
     void setClockOffsetUs(int64_t us) { clockOffsetUs_ = us; }
     void setRttUs(int64_t us) { rttUs_ = us; }
+    // The sender restarted its source (screen share stopped): its test
+    // pattern numbering starts again.
+    void resetPatternCheck() { resetPattern_ = true; }
     Stats stats() const;
 
 private:
@@ -173,6 +189,7 @@ private:
     int64_t firstFragmentUs_ = 0; // decode thread's first sight of the stream
     uint32_t lastPattern_ = 0;
     bool havePattern_ = false;
+    std::atomic<bool> resetPattern_{false};
     int64_t lastReportUs_ = 0;
     uint64_t reportExpected_ = 0, reportReceived_ = 0;
 
