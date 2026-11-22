@@ -7,6 +7,7 @@
 
 #include <array>
 #include <atomic>
+#include <mutex>
 #include <bitset>
 #include <cstdint>
 #include <functional>
@@ -58,6 +59,9 @@ public:
     struct Stats {
         uint64_t packetsSent = 0, bytesSent = 0, sendErrors = 0, simDropped = 0;
         uint64_t packetsReceived = 0, bytesReceived = 0, authFailures = 0, replays = 0, malformed = 0;
+        // Packets the peer has sent us so far, judging by packet numbers
+        // (highest - first + 1); with packetsReceived this gives path loss.
+        uint64_t packetsExpected = 0;
     };
 
     MediaTransport();
@@ -74,7 +78,13 @@ public:
     void setHandler(uint8_t streamId, Handler h);
     // Feedback packets (picture-loss indications, later NACK/CC reports).
     void setFeedbackHandler(uint8_t streamId, Handler h);
-    void setSimulatedLoss(double fraction) { simLoss_ = fraction; }
+    // Testing: drop |fraction| of outgoing packets. |meanBurst| > 1 makes
+    // the losses bursty (two-state Gilbert-Elliott model, same average).
+    void setSimulatedLoss(double fraction, double meanBurst = 1.0)
+    {
+        simLoss_ = fraction;
+        simBurst_ = meanBurst;
+    }
 
     bool start();
     void stop();
@@ -96,7 +106,12 @@ private:
     ReplayWindow replay_;
     std::atomic<bool> running_{false};
     std::thread thread_;
+    bool simulateDrop();
     double simLoss_ = 0.0;
+    double simBurst_ = 1.0;
+    std::mutex simMutex_;
+    bool simBad_ = false;
+    std::atomic<uint64_t> rxFirstPn_{0}, rxHighestPn_{0};
 
     struct AtomicStats {
         std::atomic<uint64_t> packetsSent{0}, bytesSent{0}, sendErrors{0}, simDropped{0};

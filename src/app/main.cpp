@@ -73,7 +73,14 @@ int main(int argc, char** argv)
     QCommandLineOption videoFpsOpt("video-fps", "Capture frame rate.", "fps", "60");
     QCommandLineOption videoBitrateOpt("video-bitrate", "Video bitrate in kbps.", "kbps", "12000");
     QCommandLineOption cameraFormatOpt("camera-format", "Camera format: auto, mjpeg or nv12.", "fmt", "auto");
-    cli.addOptions({videoSourceOpt, cameraOpt, videoSizeOpt, videoFpsOpt, videoBitrateOpt, cameraFormatOpt});
+    QCommandLineOption audioFecOpt("audio-fec", "Opus loss protection: lbrr (in-band FEC) or dred.", "mode",
+                                   "lbrr");
+    QCommandLineOption fecOpt("fec", "Video FEC: auto, off, or a fixed parity percentage.", "mode", "auto");
+    QCommandLineOption noNackOpt("no-nack", "Disable video retransmission requests.");
+    QCommandLineOption simBurstOpt("sim-burst", "Mean length of simulated loss bursts, in packets (testing).", "n",
+                                   "1");
+    cli.addOptions({videoSourceOpt, cameraOpt, videoSizeOpt, videoFpsOpt, videoBitrateOpt, cameraFormatOpt, fecOpt,
+                    noNackOpt, simBurstOpt, audioFecOpt});
     cli.process(*app);
 
     if (!p2p::crypto::init()) {
@@ -110,6 +117,7 @@ int main(int argc, char** argv)
     audio.noiseLevel = ns == "low" ? 0 : ns == "high" ? 2 : 1;
     audio.opus.bitrate = std::clamp(cli.value(audioBitrateOpt).toInt(), 6, 510) * 1000;
     audio.opus.restrictedLowDelay = cli.isSet(audioLowDelayOpt);
+    audio.opus.inbandFec = cli.value(audioFecOpt) != "dred";
     audio.periodMs = std::clamp(cli.value(periodOpt).toInt(), 2, 40);
     opts.mediaConfig.simulatedLoss = std::clamp(cli.value(simLossOpt).toDouble(), 0.0, 100.0) / 100.0;
     opts.media = !cli.isSet(noMediaOpt);
@@ -138,6 +146,21 @@ int main(int argc, char** argv)
                          : cfmt == "nv12"  ? p2p::video::CaptureConfig::Format::Nv12
                                            : p2p::video::CaptureConfig::Format::Auto;
     video.bitrateKbps = std::clamp(cli.value(videoBitrateOpt).toInt(), 100, 200000);
+    const QString fec = cli.value(fecOpt);
+    if (fec == "auto") video.fec = p2p::video::VideoStreamConfig::Fec::Auto;
+    else if (fec == "off") video.fec = p2p::video::VideoStreamConfig::Fec::Off;
+    else {
+        bool ok = false;
+        const double pct = fec.toDouble(&ok);
+        if (!ok || pct <= 0 || pct > 100) {
+            std::fprintf(stderr, "--fec must be auto, off or a percentage\n");
+            return 1;
+        }
+        video.fec = p2p::video::VideoStreamConfig::Fec::Fixed;
+        video.fecFixedRate = pct / 100.0;
+    }
+    video.nack = !cli.isSet(noNackOpt);
+    opts.mediaConfig.simulatedBurst = std::max(1.0, cli.value(simBurstOpt).toDouble());
 
     CallController controller(opts);
     const QString av1 = cli.value(preferAv1Opt);

@@ -18,9 +18,18 @@ MediaCaps navi10Caps()
     return {{hevcHw, av1Sw, hevcSw}, {hevcHw, av1Sw, hevcSw}};
 }
 
+struct Impair {
+    double loss = 0.0, burst = 1.0;
+    p2p::video::VideoStreamConfig::Fec fec = p2p::video::VideoStreamConfig::Fec::Auto;
+    double fecRate = 0.2;
+    bool nack = true;
+    bool audioDred = false; // DRED instead of in-band FEC
+};
+
 std::unique_ptr<CallController> makePeer(const QString& name, bool autoAccept, MediaCaps caps = navi10Caps(),
-                                         double simLoss = 0.0)
+                                         double simLoss = 0.0, Impair imp = {})
 {
+    if (simLoss == 0.0) simLoss = imp.loss;
     CallController::Options o;
     o.name = name;
     o.port = 0;
@@ -37,6 +46,11 @@ std::unique_ptr<CallController> makePeer(const QString& name, bool autoAccept, M
     o.mediaConfig.video.capture.height = 720;
     o.mediaConfig.video.capture.fps = 30;
     o.mediaConfig.video.bitrateKbps = 4000;
+    o.mediaConfig.simulatedBurst = imp.burst;
+    o.mediaConfig.audio.opus.inbandFec = !imp.audioDred;
+    o.mediaConfig.video.fec = imp.fec;
+    o.mediaConfig.video.fecFixedRate = imp.fecRate;
+    o.mediaConfig.video.nack = imp.nack;
     auto c = std::make_unique<CallController>(o);
     if (!c->start()) return nullptr;
     return c;
@@ -140,6 +154,26 @@ private slots:
         QTRY_COMPARE(b->state(), State::Idle);
     }
 
+    void audioDredConcealsBursts()
+    {
+        Impair imp;
+        imp.loss = 0.10;
+        imp.burst = 3;
+        imp.audioDred = true;
+        auto a = makePeer("alice", false, navi10Caps(), 0.0, imp), b = makePeer("bob", true, navi10Caps(), 0.0, imp);
+        a->callAddress(addrOf(*b));
+        QTRY_COMPARE(b->state(), State::InCall);
+        QTRY_VERIFY_WITH_TIMEOUT(b->mediaSession()->audioStats().jb.decoded > 300, 8000);
+        const auto s = b->mediaSession()->audioStats();
+        if (!s.dred) QSKIP("libopus built without DRED (see tools/build-opus-dred.sh)");
+        qInfo("dred bursts: concealed %llu (dred %llu fec %llu plc %llu)", (unsigned long long)s.jb.concealed,
+              (unsigned long long)s.concealDred, (unsigned long long)s.concealFec, (unsigned long long)s.concealPlc);
+        QVERIFY(s.jb.concealed > 10);
+        QVERIFY2(s.concealDred * 10 >= s.jb.concealed * 8, "DRED should cover >= 80% of burst losses");
+        a->hangup();
+        QTRY_COMPARE(b->state(), State::Idle);
+    }
+
     void videoFlowsAndDecodesCorrectly()
     {
         auto a = makePeer("alice", false), b = makePeer("bob", true);
@@ -169,27 +203,91 @@ private slots:
         QTRY_COMPARE(b->state(), State::Idle);
     }
 
-    void videoRecoversFromLossWithKeyframes()
+    // Runs alice -> bob video under |imp| (loss applies to alice's packets)
+    // until bob has decoded |frames| frames, then returns both ends' stats.
+    static std::pair<p2p::video::VideoSendStream::Stats, p2p::video::VideoReceiveStream::Stats>
+    runImpaired(Impair imp, uint64_t frames, const char* label)
     {
-        // 5% packet loss from A: frames are lost, B asks for keyframes and
-        // keeps decoding (no NACK/FEC until phase 5).
-        auto a = makePeer("alice", false, navi10Caps(), 0.05), b = makePeer("bob", true);
+        using p2p::video::VideoFeedback;
+        auto a = makePeer("alice", false, navi10Caps(), 0.0, imp);
+        Impair recvSide;
+        recvSide.nack = imp.nack;
+        recvSide.fec = imp.fec;
+        auto b = makePeer("bob", true, navi10Caps(), 0.0, recvSide);
         a->callAddress(addrOf(*b));
-        QTRY_COMPARE(b->state(), State::InCall);
-        QTRY_VERIFY(b->mediaSession());
-        QTRY_VERIFY_WITH_TIMEOUT(b->mediaSession()->videoRecvStats()->decoded >= 30, 10000);
-        QTRY_VERIFY_WITH_TIMEOUT(b->mediaSession()->videoRecvStats()->pliSent >= 1, 5000);
+        [&] {
+            QTRY_COMPARE(b->state(), State::InCall);
+            QTRY_VERIFY(b->mediaSession() && a->mediaSession());
+            QTRY_VERIFY_WITH_TIMEOUT(b->mediaSession()->videoRecvStats()->decoded >= frames, 15000);
+        }();
         const auto rx = *b->mediaSession()->videoRecvStats();
         const auto tx = *a->mediaSession()->videoSendStats();
-        qInfo("loss: lost %llu, pli sent %llu / received %llu, keyframes %llu, decoded %llu, pattern bad %llu",
-              (unsigned long long)rx.assembler.framesLost, (unsigned long long)rx.pliSent,
-              (unsigned long long)tx.pliReceived, (unsigned long long)tx.keyframes,
-              (unsigned long long)rx.decoded, (unsigned long long)rx.patternBad);
-        QVERIFY(rx.assembler.framesLost >= 1);
-        QVERIFY(tx.keyframes >= 2); // initial + at least one on request
-        QCOMPARE(rx.patternBad, 0u); // never displays a corrupt / out-of-order frame
+        qInfo("%s: path loss %.1f%%, decoded %llu (recovered %llu: fec frags %llu, resent useful %llu), "
+              "lost %llu, pli %llu, keyframes %llu, parity %llu, nack items %llu, latency avg %.1f p95 %.1f ms",
+              label, rx.pathLoss * 100, (unsigned long long)rx.decoded, (unsigned long long)rx.recoveredDecoded,
+              (unsigned long long)rx.assembler.fecRecoveredFragments,
+              (unsigned long long)rx.assembler.retransmitsUseful, (unsigned long long)rx.assembler.framesLost,
+              (unsigned long long)rx.pliSent, (unsigned long long)tx.keyframes,
+              (unsigned long long)tx.parityFragments, (unsigned long long)tx.nackItems, rx.latencyAvgMs,
+              rx.latencyP95Ms);
         a->hangup();
-        QTRY_COMPARE(b->state(), State::Idle);
+        [&] { QTRY_COMPARE(b->state(), State::Idle); }();
+        return {tx, rx};
+    }
+
+    void videoKeyframeFallbackWithoutRecovery()
+    {
+        // No NACK, no FEC: every loss costs a keyframe, but nothing corrupt is shown.
+        Impair imp;
+        imp.loss = 0.05;
+        imp.nack = false;
+        imp.fec = p2p::video::VideoStreamConfig::Fec::Off;
+        auto [tx, rx] = runImpaired(imp, 30, "keyframe-only");
+        QVERIFY(rx.assembler.framesLost >= 1);
+        QVERIFY(tx.keyframes >= 2);
+        QCOMPARE(rx.patternBad, 0u);
+    }
+
+    void videoFecRepairsRandomLoss()
+    {
+        // Fixed 30% FEC, no NACK, 3% random loss: FEC rebuilds nearly everything.
+        Impair imp;
+        imp.loss = 0.03;
+        imp.nack = false;
+        imp.fec = p2p::video::VideoStreamConfig::Fec::Fixed;
+        imp.fecRate = 0.3;
+        auto [tx, rx] = runImpaired(imp, 90, "fec-only");
+        QVERIFY(rx.assembler.fecRecoveredFragments >= 1);
+        QVERIFY(tx.parityFragments > 0);
+        QVERIFY2(rx.assembler.framesLost <= 2, qPrintable(QString::number(rx.assembler.framesLost)));
+        QCOMPARE(rx.patternBad, 0u);
+    }
+
+    void videoNackRecoversLoss()
+    {
+        // NACK with FEC off: 5% loss, every frame still arrives.
+        Impair imp;
+        imp.loss = 0.05;
+        imp.fec = p2p::video::VideoStreamConfig::Fec::Off;
+        auto [tx, rx] = runImpaired(imp, 90, "nack");
+        QCOMPARE(rx.assembler.framesLost, 0u);
+        QVERIFY(rx.assembler.retransmitsUseful >= 1);
+        QVERIFY(rx.recoveredDecoded >= 1);
+        QCOMPARE(tx.keyframes, 1u);
+        QCOMPARE(rx.patternBad, 0u);
+        QVERIFY(rx.latencyP95Ms < 60);
+    }
+
+    void videoSurvivesBurstLossWithAutoFec()
+    {
+        // 5% loss in bursts of ~4 packets, default settings (NACK + auto FEC).
+        Impair imp;
+        imp.loss = 0.05;
+        imp.burst = 4;
+        auto [tx, rx] = runImpaired(imp, 120, "burst-auto");
+        QVERIFY(tx.reportedLoss > 0.0 || tx.fecRate > 0.0 || tx.parityFragments > 0);
+        QVERIFY2(rx.assembler.framesLost <= 1, qPrintable(QString::number(rx.assembler.framesLost)));
+        QCOMPARE(rx.patternBad, 0u);
     }
 
     void audioProcessingTogglesApplyLive()

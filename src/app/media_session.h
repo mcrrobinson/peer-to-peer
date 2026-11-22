@@ -22,6 +22,7 @@ public:
         audio::AudioPipeline::Config audio;
         video::VideoStreamConfig video;
         double simulatedLoss = 0.0; // fraction of outgoing packets to drop (testing)
+        double simulatedBurst = 1.0; // mean loss burst length in packets (testing)
     };
 
     explicit MediaSession(Config cfg);
@@ -38,6 +39,7 @@ public:
     void stop();
 
     void setClockOffsetUs(int64_t us);
+    void setRttUs(int64_t us);
     void setMuted(bool m);
     // Live AEC / NS / AGC switching; also remembered for a later start().
     void setAudioProcessing(bool echoCancel, bool noiseSuppress, bool autoGain, int noiseLevel);

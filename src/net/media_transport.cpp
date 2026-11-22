@@ -191,7 +191,7 @@ bool MediaTransport::send(uint8_t type, uint8_t streamId, const uint8_t* payload
                                               nullptr, nonce, tx_.data());
     const size_t total = kHeaderSize + size_t(clen);
 
-    if (simLoss_ > 0 && double(randombytes_uniform(1'000'000)) < simLoss_ * 1e6) {
+    if (simLoss_ > 0 && simulateDrop()) {
         st_.simDropped.fetch_add(1, std::memory_order_relaxed);
         return true;
     }
@@ -236,6 +236,8 @@ void MediaTransport::recvLoop()
                 continue;
             }
             replay_.mark(pn);
+            if (rxFirstPn_.load(std::memory_order_relaxed) == 0) rxFirstPn_.store(pn, std::memory_order_relaxed);
+            if (pn > rxHighestPn_.load(std::memory_order_relaxed)) rxHighestPn_.store(pn, std::memory_order_relaxed);
             st_.packetsReceived.fetch_add(1, std::memory_order_relaxed);
             st_.bytesReceived.fetch_add(uint64_t(n), std::memory_order_relaxed);
             const uint8_t type = pkt[0] & 0x3f;
@@ -251,8 +253,23 @@ void MediaTransport::recvLoop()
 MediaTransport::Stats MediaTransport::stats() const
 {
     auto r = [](const std::atomic<uint64_t>& a) { return a.load(std::memory_order_relaxed); };
-    return {r(st_.packetsSent), r(st_.bytesSent), r(st_.sendErrors), r(st_.simDropped),
-            r(st_.packetsReceived), r(st_.bytesReceived), r(st_.authFailures), r(st_.replays), r(st_.malformed)};
+    const uint64_t first = r(rxFirstPn_), highest = r(rxHighestPn_);
+    return {r(st_.packetsSent),     r(st_.bytesSent),    r(st_.sendErrors), r(st_.simDropped),
+            r(st_.packetsReceived), r(st_.bytesReceived), r(st_.authFailures), r(st_.replays),
+            r(st_.malformed),       first ? highest - first + 1 : 0};
+}
+
+bool MediaTransport::simulateDrop()
+{
+    auto uniform = [] { return double(randombytes_uniform(1'000'000)) / 1e6; };
+    if (simBurst_ <= 1.0) return uniform() < simLoss_;
+    // Bad state drops everything and lasts |simBurst_| packets on average;
+    // the good->bad rate is chosen so the long-run loss equals simLoss_.
+    std::lock_guard l(simMutex_);
+    const double toGood = 1.0 / simBurst_;
+    const double toBad = simLoss_ >= 1.0 ? 1.0 : toGood * simLoss_ / (1.0 - simLoss_);
+    simBad_ = simBad_ ? uniform() >= toGood : uniform() < toBad;
+    return simBad_;
 }
 
 } // namespace p2p::net

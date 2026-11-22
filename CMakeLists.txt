@@ -13,6 +13,12 @@ qt_standard_project_setup(REQUIRES 6.7)
 find_package(PkgConfig REQUIRED)
 pkg_check_modules(SODIUM REQUIRED IMPORTED_TARGET libsodium)
 pkg_check_modules(FFMPEG REQUIRED IMPORTED_TARGET libavcodec libavutil libswscale)
+# Prefer a local libopus built with DRED (tools/build-opus-dred.sh) when present.
+set(P2P_OPUS_PREFIX "${CMAKE_SOURCE_DIR}/build/third_party/opus" CACHE PATH "libopus with DRED")
+if(EXISTS "${P2P_OPUS_PREFIX}/lib/pkgconfig/opus.pc")
+    set(ENV{PKG_CONFIG_PATH} "${P2P_OPUS_PREFIX}/lib/pkgconfig:$ENV{PKG_CONFIG_PATH}")
+    message(STATUS "Using libopus from ${P2P_OPUS_PREFIX}")
+endif()
 pkg_check_modules(OPUS REQUIRED IMPORTED_TARGET opus>=1.5)
 pkg_check_modules(WEBRTC_APM IMPORTED_TARGET webrtc-audio-processing-1)
 find_path(MINIAUDIO_INCLUDE_DIR miniaudio.h PATH_SUFFIXES miniaudio)
@@ -26,6 +32,7 @@ add_library(p2pcore STATIC
     src/net/control_channel.h   src/net/control_channel.cpp
     src/net/discovery.h         src/net/discovery.cpp
     src/net/media_transport.h   src/net/media_transport.cpp
+    src/net/fec.h                 src/net/fec.cpp
     src/audio/jitter_buffer.h   src/audio/jitter_buffer.cpp
     src/audio/drift_resampler.h src/audio/drift_resampler.cpp
     src/audio/opus_codec.h      src/audio/opus_codec.cpp
@@ -110,7 +117,7 @@ target_compile_options(p2pcall PRIVATE -Wall -Wextra)
 # ---------------------------------------------------------------------------
 if(P2P_BUILD_TESTS)
     enable_testing()
-    foreach(t test_crypto test_negotiation test_jitter_buffer test_drift_resampler test_transport test_video_packetizer test_call)
+    foreach(t test_crypto test_negotiation test_jitter_buffer test_drift_resampler test_transport test_fec test_video_packetizer test_call)
         qt_add_executable(${t} tests/${t}.cpp)
         target_link_libraries(${t} PRIVATE p2pcore Qt6::Test)
         add_test(NAME ${t} COMMAND ${t})

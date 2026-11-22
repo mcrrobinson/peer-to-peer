@@ -20,14 +20,29 @@ std::vector<uint8_t> payload(size_t n, uint8_t seed)
     return v;
 }
 
-std::vector<Frag> split(uint32_t id, const std::vector<uint8_t>& data, bool key, size_t mtu = 1400)
+std::vector<Frag> split(uint32_t id, const std::vector<uint8_t>& data, bool key, size_t mtu = 1400,
+                        double fecRate = 0, int fecBlock = 32)
 {
     std::vector<Frag> out;
-    packetizeFrame(id, int64_t(id) * 1000, key, 1, data.data(), data.size(), mtu, [&](const uint8_t* p, size_t n) {
-        auto h = FragmentHeader::read(p, n);
-        QVERIFY(h);
-        out.push_back({*h, std::vector<uint8_t>(p + FragmentHeader::kSize, p + n)});
-    });
+    PacketizeOptions opt;
+    opt.fecRate = fecRate;
+    opt.fecBlockSize = fecBlock;
+    packetizeFrame(
+        id, int64_t(id) * 1000, key, 1, data.data(), data.size(), mtu,
+        [&](const uint8_t* p, size_t n) {
+            auto h = FragmentHeader::read(p, n);
+            QVERIFY(h);
+            out.push_back({*h, std::vector<uint8_t>(p + FragmentHeader::kSize, p + n)});
+        },
+        opt);
+    return out;
+}
+
+std::vector<Frag> dataOnly(const std::vector<Frag>& f)
+{
+    std::vector<Frag> out;
+    for (const auto& x : f)
+        if (!x.h.isParity()) out.push_back(x);
     return out;
 }
 
@@ -158,6 +173,91 @@ private slots:
         feed(a, f1);
         QCOMPARE(a.stats().lateFragments, f1.size());
         QVERIFY(a.poll(0).empty());
+    }
+
+    void fecRebuildsLostFragments()
+    {
+        // 100 kB keyframe, 25% parity in blocks of 16: lose 3 fragments in
+        // one block and 1 in another (including the short last fragment).
+        const auto data = payload(100'000, 9);
+        auto frags = split(1, data, true, 1400, 0.25, 16);
+        const size_t nData = dataOnly(frags).size();
+        QCOMPARE(nData, size_t(73));
+        QCOMPARE(frags.size() - nData, size_t(5 * 4)); // 5 blocks x ceil(16 * .25)
+        std::vector<Frag> kept;
+        for (const auto& f : frags)
+            if (f.h.index != 0 && f.h.index != 5 && f.h.index != 15 && f.h.index != nData - 1) kept.push_back(f);
+        FrameAssembler a;
+        feed(a, kept);
+        auto out = a.poll(0);
+        QCOMPARE(out.size(), size_t(1));
+        QCOMPARE(out[0].data, data);
+        QVERIFY(out[0].recovered);
+        QCOMPARE(a.stats().fecRecoveredFragments, 4u);
+        QCOMPARE(a.stats().fecRecoveredFrames, 1u);
+    }
+
+    void fecGivesUpBeyondParity()
+    {
+        auto frags = split(1, payload(20'000, 1), true, 1400, 0.1, 32); // 15 data + 2 parity
+        std::vector<Frag> kept;
+        for (const auto& f : frags)
+            if (f.h.index > 2) kept.push_back(f); // 3 data lost, 2 parity
+        FrameAssembler a;
+        feed(a, kept);
+        QVERIFY(a.poll(0).empty());
+        // Only the shortfall is requested: 3 missing - 2 parity = 1.
+        auto n = a.collectNacks(5'000, {});
+        QCOMPARE(n.size(), size_t(1));
+        QCOMPARE(n[0].index, uint16_t(0));
+    }
+
+    void nackRequestsHolesThenRetries()
+    {
+        FrameAssembler a;
+        feed(a, split(1, payload(3000, 1), true));
+        QCOMPARE(a.poll(0).size(), size_t(1));
+        auto f2 = split(2, payload(5000, 2), false); // 4 fragments
+        f2.erase(f2.begin() + 1);
+        feed(a, f2, 1000);
+        FrameAssembler::NackPolicy pol;
+        QVERIFY(a.collectNacks(1500, pol).empty()); // still inside reorder window
+        auto n = a.collectNacks(3500, pol);
+        QCOMPARE(n.size(), size_t(1));
+        QCOMPARE(n[0].frameId, 2u);
+        QCOMPARE(n[0].index, uint16_t(1));
+        QVERIFY(a.collectNacks(5000, pol).empty());  // retry interval not over
+        QCOMPARE(a.collectNacks(14000, pol).size(), size_t(1));
+        QCOMPARE(a.collectNacks(25000, pol).size(), size_t(1));
+        QVERIFY(a.collectNacks(40000, pol).empty()); // max tries reached
+
+        // The resend completes the frame.
+        auto again = split(2, payload(5000, 2), false);
+        again[1].h.flags |= FragmentHeader::kRetransmit;
+        a.insert(again[1].h, again[1].data.data(), again[1].data.size(), 41000);
+        auto out = a.poll(41000);
+        QCOMPARE(out.size(), size_t(1));
+        QVERIFY(out[0].recovered);
+        QCOMPARE(a.stats().retransmitsUseful, 1u);
+    }
+
+    void nackWholeMissingFrame()
+    {
+        FrameAssembler a;
+        feed(a, split(1, payload(3000, 1), true));
+        a.poll(0);
+        feed(a, split(3, payload(3000, 3), false), 1000); // 2 vanished entirely
+        QVERIFY(a.poll(1000).empty());
+        QVERIFY(a.collectNacks(1000, {}).empty());
+        auto n = a.collectNacks(4000, {});
+        QCOMPARE(n.size(), size_t(1));
+        QCOMPARE(n[0].frameId, 2u);
+        QCOMPARE(n[0].index, NackItem::kWholeFrame);
+        feed(a, split(2, payload(3000, 2), false), 4500);
+        auto out = a.poll(4500);
+        QCOMPARE(out.size(), size_t(2));
+        QCOMPARE(out[0].id, 2u);
+        QCOMPARE(out[1].id, 3u);
     }
 
     void frameIdWrapAround()

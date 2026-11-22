@@ -23,7 +23,10 @@ public:
         int bitrate = 48000;
         bool restrictedLowDelay = false;
         int expectedLossPct = 10;   // drives LBRR/DRED usage
-        int dredFrames = 10;        // 10 ms units; 0 disables DRED
+        // In-band FEC (LBRR) rebuilds one lost frame at full quality; at
+        // 48 kbps / 10 ms it uses up the budget libopus would give DRED.
+        bool inbandFec = true;
+        int dredFrames = 100;       // DRED duration request; 0 disables DRED
     };
     ~OpusEncoderWrapper();
     bool init(const Config& cfg);

@@ -34,7 +34,7 @@ bool MediaSession::start(const crypto::SessionKeys& keys, const QHostAddress& re
         if (error) *error = QStringLiteral("bad remote media address");
         return false;
     }
-    transport_.setSimulatedLoss(cfg_.simulatedLoss);
+    transport_.setSimulatedLoss(cfg_.simulatedLoss, cfg_.simulatedBurst);
 
     audio_ = std::make_unique<audio::AudioPipeline>(cfg_.audio, transport_);
     audio_->attach();
@@ -45,7 +45,7 @@ bool MediaSession::start(const crypto::SessionKeys& keys, const QHostAddress& re
     }
     if (recvCamera) {
         videoRecv_ = std::make_unique<video::VideoReceiveStream>(*recvCamera, transport_, net::wire::kCamera,
-                                                                 QStringLiteral("remote"));
+                                                                 QStringLiteral("remote"), cfg_.video.nack);
         videoRecv_->attach();
     }
     transport_.start();
@@ -98,6 +98,11 @@ void MediaSession::setClockOffsetUs(int64_t us)
     if (videoRecv_) videoRecv_->setClockOffsetUs(us);
 }
 
+void MediaSession::setRttUs(int64_t us)
+{
+    if (videoRecv_) videoRecv_->setRttUs(us);
+}
+
 void MediaSession::setAudioProcessing(bool echoCancel, bool noiseSuppress, bool autoGain, int noiseLevel)
 {
     cfg_.audio.echoCancel = echoCancel;
@@ -125,7 +130,7 @@ QString MediaSession::statsText() const
     if (videoSend_) {
         const auto v = videoSend_->stats();
         s += QStringLiteral("\nvideo tx %1 %2x%3 %4 fps %5 kbps | enc %6 avg %7 ms max %8 ms | key %9 pli-rx %10\n"
-                            "     src %11")
+                            "     src %11\n     loss rep %12% | fec %13% (%14 parity) | nack items %15 resent %16 miss %17")
                  .arg(v.encoder)
                  .arg(v.width)
                  .arg(v.height)
@@ -136,12 +141,19 @@ QString MediaSession::statsText() const
                  .arg(v.encodeMaxMs, 0, 'f', 1)
                  .arg(v.keyframes)
                  .arg(v.pliReceived)
-                 .arg(v.source);
+                 .arg(v.source)
+                 .arg(v.reportedLoss * 100, 0, 'f', 2)
+                 .arg(v.fecRate * 100, 0, 'f', 0)
+                 .arg(v.parityFragments)
+                 .arg(v.nackItems)
+                 .arg(v.retransmitted)
+                 .arg(v.retransmitMisses);
     }
     if (videoRecv_) {
         const auto v = videoRecv_->stats();
         s += QStringLiteral("\nvideo rx %1 %2x%3 %4 fps %5 kbps | dec %6 avg %7 ms err %8 | lost %9 skipped %10 "
-                            "pli-tx %11\n     latency capture->decoded avg %12 ms p95 %13 ms | pattern ok %14 bad %15")
+                            "pli-tx %11\n     latency capture->decoded avg %12 ms p95 %13 ms | pattern ok %14 bad %15\n"
+                            "     path loss %16% | recovered frames %17 (fec %18 frags, resend %19/%20 useful) nack %21")
                  .arg(v.decoder)
                  .arg(v.width)
                  .arg(v.height)
@@ -156,7 +168,13 @@ QString MediaSession::statsText() const
                  .arg(v.latencyAvgMs, 0, 'f', 1)
                  .arg(v.latencyP95Ms, 0, 'f', 1)
                  .arg(v.patternOk)
-                 .arg(v.patternBad);
+                 .arg(v.patternBad)
+                 .arg(v.pathLoss * 100, 0, 'f', 2)
+                 .arg(v.recoveredDecoded)
+                 .arg(v.assembler.fecRecoveredFragments)
+                 .arg(v.assembler.retransmitsUseful)
+                 .arg(v.assembler.retransmitsReceived)
+                 .arg(v.assembler.nacked);
     }
     s += QStringLiteral("\nudp tx %1 pkts rx %2 pkts | auth-fail %3 replay %4 sim-drop %5 send-err %6")
              .arg(t.packetsSent)

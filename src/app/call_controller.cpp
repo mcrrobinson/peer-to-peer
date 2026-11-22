@@ -68,7 +68,10 @@ CallController::CallController(Options opts, QObject* parent)
     mediaStatsTimer_.setInterval(500);
     connect(&mediaStatsTimer_, &QTimer::timeout, this, [this] {
         if (!media_) return;
-        if (channel_) media_->setClockOffsetUs(int64_t(channel_->clockOffsetMs() * 1000.0));
+        if (channel_) {
+            media_->setClockOffsetUs(int64_t(channel_->clockOffsetMs() * 1000.0));
+            if (channel_->rttMs() >= 0) media_->setRttUs(int64_t(channel_->rttMs() * 1000.0));
+        }
         mediaStats_ = media_->statsText();
         emit mediaStatsChanged();
         static int tick = 0;
@@ -397,6 +400,7 @@ void CallController::startMedia()
     }
     media_->setMuted(micMuted_);
     media_->setClockOffsetUs(int64_t(channel_->clockOffsetMs() * 1000.0));
+    if (channel_->rttMs() >= 0) media_->setRttUs(int64_t(channel_->rttMs() * 1000.0));
     appendLog(QStringLiteral("media flowing: udp %1 -> %2:%3")
                   .arg(media_->localPort())
                   .arg(channel_->peerAddress().toString())

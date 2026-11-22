@@ -28,7 +28,7 @@ bool OpusEncoderWrapper::init(const Config& cfg)
     opus_encoder_ctl(enc_, OPUS_SET_SIGNAL(OPUS_SIGNAL_VOICE));
     opus_encoder_ctl(enc_, OPUS_SET_VBR(1));
     opus_encoder_ctl(enc_, OPUS_SET_VBR_CONSTRAINT(1));
-    opus_encoder_ctl(enc_, OPUS_SET_INBAND_FEC(cfg.restrictedLowDelay ? 0 : 1));
+    opus_encoder_ctl(enc_, OPUS_SET_INBAND_FEC(cfg.restrictedLowDelay || !cfg.inbandFec ? 0 : 1));
     opus_encoder_ctl(enc_, OPUS_SET_PACKET_LOSS_PERC(cfg.expectedLossPct));
     opus_encoder_ctl(enc_, OPUS_SET_LSB_DEPTH(16));
     opus_encoder_ctl(enc_, OPUS_GET_LOOKAHEAD(&lookahead_));
