@@ -71,7 +71,8 @@ int main(int argc, char** argv)
     QCommandLineOption cameraOpt("camera", "V4L2 camera device.", "device", "/dev/video0");
     QCommandLineOption videoSizeOpt("video-size", "Capture size WxH.", "WxH", "1920x1080");
     QCommandLineOption videoFpsOpt("video-fps", "Capture frame rate.", "fps", "60");
-    QCommandLineOption videoBitrateOpt("video-bitrate", "Video bitrate in kbps.", "kbps", "12000");
+    QCommandLineOption videoBitrateOpt("video-bitrate", "Video bitrate in kbps (the maximum with --cc on).", "kbps",
+                                       "12000");
     QCommandLineOption cameraFormatOpt("camera-format", "Camera format: auto, mjpeg or nv12.", "fmt", "auto");
     QCommandLineOption audioFecOpt("audio-fec", "Opus loss protection: lbrr (in-band FEC) or dred.", "mode",
                                    "lbrr");
@@ -79,8 +80,20 @@ int main(int argc, char** argv)
     QCommandLineOption noNackOpt("no-nack", "Disable video retransmission requests.");
     QCommandLineOption simBurstOpt("sim-burst", "Mean length of simulated loss bursts, in packets (testing).", "n",
                                    "1");
+    QCommandLineOption ccOpt("cc", "Congestion control: on (video follows the link) or off (fixed bitrate).",
+                             "on|off", "on");
+    QCommandLineOption minBitrateOpt("min-video-bitrate", "Lowest video bitrate congestion control may pick, kbps.",
+                                     "kbps", "300");
+    QCommandLineOption simRateOpt("sim-rate", "Simulated bottleneck rate on outgoing media, kbps (testing).", "kbps",
+                                  "0");
+    QCommandLineOption simDelayOpt("sim-delay", "Simulated one-way delay on outgoing media, ms (testing).", "ms", "0");
+    QCommandLineOption simQueueOpt("sim-queue", "Simulated bottleneck buffer, ms of drain time (testing).", "ms",
+                                   "100");
+    QCommandLineOption simCeOpt("sim-ce", "Simulated L4S marking: CE above this queue delay, ms (0 = off).", "ms",
+                                "0");
     cli.addOptions({videoSourceOpt, cameraOpt, videoSizeOpt, videoFpsOpt, videoBitrateOpt, cameraFormatOpt, fecOpt,
-                    noNackOpt, simBurstOpt, audioFecOpt});
+                    noNackOpt, simBurstOpt, audioFecOpt, ccOpt, minBitrateOpt, simRateOpt, simDelayOpt, simQueueOpt,
+                    simCeOpt});
     cli.process(*app);
 
     if (!p2p::crypto::init()) {
@@ -161,6 +174,13 @@ int main(int argc, char** argv)
     }
     video.nack = !cli.isSet(noNackOpt);
     opts.mediaConfig.simulatedBurst = std::max(1.0, cli.value(simBurstOpt).toDouble());
+    video.congestionControl = cli.value(ccOpt) != "off";
+    video.minBitrateKbps = std::clamp(cli.value(minBitrateOpt).toInt(), 100, video.bitrateKbps);
+    auto& sim = opts.mediaConfig.linkSim;
+    sim.rateBps = std::max<int64_t>(0, cli.value(simRateOpt).toLongLong()) * 1000;
+    sim.delayUs = int64_t(std::max(0.0, cli.value(simDelayOpt).toDouble()) * 1000);
+    sim.queueUs = int64_t(std::max(1.0, cli.value(simQueueOpt).toDouble()) * 1000);
+    sim.ceThresholdUs = int64_t(std::max(0.0, cli.value(simCeOpt).toDouble()) * 1000);
 
     CallController controller(opts);
     const QString av1 = cli.value(preferAv1Opt);

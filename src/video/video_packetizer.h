@@ -165,6 +165,10 @@ private:
     bool haveHighest_ = false;
     uint32_t highestId_ = 0;      // newest frame id seen
     int64_t gapSinceUs_ = -1;     // when a frame newer than nextId_ first showed up
+    bool haveLastFragment_ = false;
+    uint32_t lastFragmentFrame_ = 0;
+    int64_t lastFragmentUs_ = 0;
+    int64_t fragmentGapUs_ = 0;   // EWMA of the gap between fragments of one frame
     Stats st_;
 };
 

@@ -3,6 +3,7 @@
 #include "media/codec_caps.h"
 #include "video/video_decoder.h"
 #include "video/video_encoder.h"
+#include "video/rate_ladder.h"
 #include "video/video_packetizer.h"
 #include "video/video_source.h"
 
@@ -15,6 +16,8 @@
 #include <mutex>
 #include <thread>
 
+struct SwsContext;
+
 namespace p2p::net {
 class MediaTransport;
 }
@@ -26,7 +29,9 @@ struct VideoStreamConfig {
     enum class Fec { Off, Auto, Fixed };
     Source source = Source::Camera;
     CaptureConfig capture;
-    int bitrateKbps = 12000;
+    int bitrateKbps = 12000;       // the maximum with congestion control, else fixed
+    int minBitrateKbps = 300;
+    bool congestionControl = true; // follow the transport's target via the rate ladder
     bool fallbackToPattern = true; // camera unavailable (e.g. held by another instance)
     Fec fec = Fec::Auto;
     double fecFixedRate = 0.2;     // parity / data for Fec::Fixed
@@ -36,15 +41,19 @@ struct VideoStreamConfig {
 // Feedback payloads on the video stream ids (first byte = kind):
 //   PictureLoss: no body.
 //   Nack:        repeated { u32 frame id, u16 fragment index (0xffff = whole frame) }.
-//   LossReport:  u16 path loss in basis points over the last interval.
-enum class VideoFeedback : uint8_t { PictureLoss = 1, Nack = 2, LossReport = 3 };
+// (Kind 3, a video-only loss report, was replaced by transport-wide
+// congestion feedback.)
+enum class VideoFeedback : uint8_t { PictureLoss = 1, Nack = 2 };
 
 // FEC parity share for the sender's loss estimate: off when the path is
 // clean, otherwise enough to cover roughly twice the loss rate; keyframes
 // get more because losing one costs a full refresh.
 double autoFecRate(double loss, bool keyframe);
 
-// Capture -> encode -> packetize -> transport. Runs on the source's thread.
+// Capture -> [scale] -> encode -> packetize -> pacer/transport. Runs on the
+// source's thread. With congestion control the encoder follows a rate
+// ladder (re-opened on each rung change) and frames are skipped while the
+// pacer is backed up by more than 1.5 frame intervals.
 class VideoSendStream {
 public:
     struct Stats {
@@ -52,8 +61,11 @@ public:
         uint64_t nackItems = 0, retransmitted = 0, retransmitMisses = 0, parityFragments = 0;
         double encodeAvgMs = 0, encodeMaxMs = 0;
         double kbps = 0, fps = 0;
-        double reportedLoss = 0, fecRate = 0;
-        int width = 0, height = 0;
+        double reportedLoss = 0, fecRate = 0; // loss: the congestion controller's estimate
+        int width = 0, height = 0;            // encoded size
+        uint64_t framesSkipped = 0, rungSwitches = 0;
+        int rungKbps = 0, rungIndex = 0, rungCount = 0;
+        double budgetKbps = 0, reopenMaxMs = 0;
         QString encoder, source;
     };
 
@@ -76,6 +88,8 @@ private:
     void onFrame(std::shared_ptr<VideoFrame> f);
     void onFeedback(const uint8_t* d, size_t n);
     void resend(const std::vector<uint8_t>& payload);
+    bool openEncoder(const Rung& r, int fps);
+    const VideoFrame* scaled(const VideoFrame& f, int w, int h);
 
     VideoStreamConfig cfg_;
     media::StreamSelection sel_;
@@ -85,6 +99,10 @@ private:
     std::unique_ptr<VideoSource> source_;
     std::unique_ptr<VideoEncoder> encoder_;
     bool encoderFailed_ = false;
+    std::unique_ptr<RungSelector> ladder_;
+    SwsContext* sws_ = nullptr;
+    VideoFrame scaledFrame_;
+    double lastFecRate_ = 0;
     uint32_t frameId_ = 0;
     std::atomic<bool> forceKeyframe_{true};
     bool sendingPattern_ = false;
@@ -133,7 +151,7 @@ private:
     void decodeLoop();
     void requestKeyframe(int64_t nowUs);
     void sendNacks(const std::vector<NackItem>& items);
-    void maybeReportLoss(int64_t nowUs);
+    void updatePathLoss(int64_t nowUs);
 
     media::StreamSelection sel_;
     net::MediaTransport& transport_;

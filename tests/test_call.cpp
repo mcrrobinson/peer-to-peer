@@ -24,6 +24,8 @@ struct Impair {
     double fecRate = 0.2;
     bool nack = true;
     bool audioDred = false; // DRED instead of in-band FEC
+    p2p::net::MediaTransport::LinkSim link; // bottleneck on this peer's outgoing media
+    bool cc = true;
 };
 
 std::unique_ptr<CallController> makePeer(const QString& name, bool autoAccept, MediaCaps caps = navi10Caps(),
@@ -51,6 +53,8 @@ std::unique_ptr<CallController> makePeer(const QString& name, bool autoAccept, M
     o.mediaConfig.video.fec = imp.fec;
     o.mediaConfig.video.fecFixedRate = imp.fecRate;
     o.mediaConfig.video.nack = imp.nack;
+    o.mediaConfig.linkSim = imp.link;
+    o.mediaConfig.video.congestionControl = imp.cc;
     auto c = std::make_unique<CallController>(o);
     if (!c->start()) return nullptr;
     return c;
@@ -288,6 +292,37 @@ private slots:
         QVERIFY(tx.reportedLoss > 0.0 || tx.fecRate > 0.0 || tx.parityFragments > 0);
         QVERIFY2(rx.assembler.framesLost <= 1, qPrintable(QString::number(rx.assembler.framesLost)));
         QCOMPARE(rx.patternBad, 0u);
+    }
+
+    void congestionControlAdaptsToBottleneck()
+    {
+        // 4 Mbps video into a 2 Mbps link with 5 ms delay: the controller
+        // must find the link, pace, step the encoder down, and keep the
+        // queue (and so latency) bounded.
+        Impair imp;
+        imp.link.rateBps = 2'000'000;
+        imp.link.delayUs = 5'000;
+        auto [tx, rx] = runImpaired(imp, 240, "bottleneck 2M");
+        qInfo("bottleneck: rung %d kbps %dx%d, switches %llu, skipped %llu, budget %.0f kbps",
+              tx.rungKbps, tx.width, tx.height, (unsigned long long)tx.rungSwitches,
+              (unsigned long long)tx.framesSkipped, tx.budgetKbps);
+        QVERIFY(tx.rungSwitches >= 1);
+        QVERIFY2(tx.rungKbps < 2000, qPrintable(QString::number(tx.rungKbps)));
+        QVERIFY2(tx.rungKbps >= 450, qPrintable(QString::number(tx.rungKbps))); // not collapsed
+        QCOMPARE(rx.patternBad, 0u);
+        QCOMPARE(rx.decodeErrors, 0u);
+        QVERIFY2(rx.latencyP95Ms < 150, qPrintable(QString::number(rx.latencyP95Ms)));
+    }
+
+    void congestionControlStaysOutOfTheWayOnLan()
+    {
+        Impair imp;
+        auto [tx, rx] = runImpaired(imp, 90, "lan cc");
+        QCOMPARE(tx.rungSwitches, 0u);
+        QCOMPARE(tx.rungKbps, 4000);
+        QCOMPARE(tx.framesSkipped, 0u);
+        QCOMPARE(tx.keyframes, 1u);
+        QCOMPARE(rx.assembler.nacked, 0u);
     }
 
     void audioProcessingTogglesApplyLive()

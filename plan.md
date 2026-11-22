@@ -22,7 +22,7 @@ Logitech StreamCam `/dev/video0` (60 fps only as MJPEG; NV12 ≤ 30 fps).
 
 ## Build / run / test
 ```sh
-cmake --preset dev && cmake --build --preset dev && ctest --preset dev   # 8 suites
+cmake --preset dev && cmake --build --preset dev && ctest --preset dev   # 9 suites
 tools/build-opus-dred.sh        # optional: libopus 1.5.2 with DRED into build/third_party/opus
                                 # (CMake picks it up; clear cache with -U 'OPUS*' -U '__pkg_config_checked_OPUS')
 ./build/dev/p2pcall --instance 1 --video-source camera
@@ -30,9 +30,10 @@ tools/build-opus-dred.sh        # optional: libopus 1.5.2 with DRED into build/t
 ```
 Headless pair: `--headless --no-discovery --auto-accept --exit-after-call N` on one side,
 `--connect 127.0.0.1:4710N` on the other; `--audio-io null --audio-source tone|silence`.
-Impairment: `--sim-loss <pct> --sim-burst <n>` (in-app), `sudo tests/net/netem.sh on lan|wifi|wan|lossy`
-/ `off` (real delay/jitter on loopback; RTT = 2× delay).
-Other flags: `--fec auto|off|<pct>`, `--no-nack`, `--audio-fec lbrr|dred`, `--video-size`,
+Impairment: `--sim-loss <pct> --sim-burst <n>` (in-app), `--sim-rate <kbps> --sim-delay <ms> --sim-queue <ms>
+--sim-ce <ms>` (in-app bottleneck on outgoing media, optional L4S CE marking),
+`sudo tests/net/netem.sh on lan|wifi|wan|lossy|bottleneck` / `off` (real delay/jitter on loopback; RTT = 2× delay).
+Other flags: `--cc on|off`, `--min-video-bitrate`, `--fec auto|off|<pct>`, `--no-nack`, `--audio-fec lbrr|dred`, `--video-size`,
 `--video-fps`, `--video-bitrate`, `--camera-format auto|mjpeg|nv12`, `--prefer-av1 camera|screen|both`,
 `--aec/--ns/--agc` (all off by default — buggy, deliberately parked).
 
@@ -41,20 +42,42 @@ Other flags: `--fec auto|off|<pct>`, `--no-nack`, `--audio-fec lbrr|dred`, `--vi
   `control_channel` (TCP, length-prefixed encrypted JSON, ping/pong RTT + clock offset with an
   initial 5-ping burst), `discovery` (multicast beacons 239.255.77.77:47999),
   `media_transport` (UDP, 12-byte header = AEAD AD, packet number = nonce, replay window,
-  per-stream media + feedback handlers, rx loss accounting, Gilbert-Elliott sim loss),
-  `fec` (GF(256) Cauchy Reed-Solomon erasure code).
+  per-stream media + feedback handlers, rx loss accounting, Gilbert-Elliott sim loss, ECT(1) on
+  send / ECN read via `IP_RECVTOS`, transport-wide feedback every ~10 ms, pacer thread, link-sim
+  thread), `fec` (GF(256) Cauchy Reed-Solomon erasure code),
+  `cc/transport_feedback` (RFC 8888-like reports, overlapping ranges), `cc/congestion_controller`.
 - `src/audio`: miniaudio device I/O, Opus 10 ms VOIP 48 kbps + LBRR (or DRED), adaptive jitter
   buffer (p95 jitter target, DRED→FEC→PLC concealment), drift resampler, optional APM.
 - `src/video`: V4L2 camera (MJPEG→NV12 via swscale, BT.601→709), test pattern with a 32-bit frame
   code readable after decode, VA-API/x265/SVT-AV1 encoder (CBR, VBV ≈ 1 frame, P-only, IDR on
-  demand), VA-API/dav1d decoder, packetizer + `FrameAssembler`, `video_stream` (send/receive).
+  demand), VA-API/dav1d decoder, packetizer + `FrameAssembler`, `rate_ladder` (rungs ×0.7, resolution
+  drops below 0.04 bits/pixel/frame, hysteresis), `video_stream` (send/receive; swscale downscale).
 - `src/app`: `CallController` (state machine, caps/invite/accept), `MediaSession`, `VideoView`
   (`QQuickRhiItem`, NV12 shader in `shaders/`), `main.cpp` CLI. UI in `qml/Main.qml`.
 
 Video fragment header (24 B, inside the encrypted payload): frame id, index, data-fragment count,
 capture µs, flags (key / test-pattern / retransmit), codec, display w/h (Mesa pads 1080→1088 with
 no conformance window, so the receiver crops), FEC parity-per-block, FEC block size. Video
-feedback kinds: PLI, NACK (frame id + index, 0xffff = whole frame), loss report (basis points).
+feedback kinds: PLI, NACK (frame id + index, 0xffff = whole frame). Transport feedback (wire type 3):
+report µs, base pn, count, u16 per packet {received, ECN, arrival offset in 64 µs units}.
+
+Congestion control (phase 6), in `MediaTransport` because it sees every packet:
+- Queue delay = OWD − 30 s windowed min OWD; control signal = min over 50 ms (standing queue, not
+  per-frame burst). Target 10 ms. Over target: cut ∝ excess; queue > 2× target: cut to below the
+  delivery rate so it drains in ~400 ms, then hold further delay cuts until it could have drained.
+- L4S: CE fraction → EWMA α (g = 1/16), cut α/2 at most once per RTT + 50 ms.
+- Loss counts as congestion only with queueing (q > target/2) or > 10% loss; random loss is left to
+  NACK/FEC. Loss is only declared for packets a report lists as missing (lost reports ≠ lost media).
+- Increase +50%/s, +12%/s within ±15% of the last congestion rate; held when the queue is above
+  target/2 or when app-limited (target > 1.6× delivered).
+- Starts at max (LAN). Range: video max × 1.25 + 150 kbps down to video min + 80 kbps.
+- Pacing (1.5× target) only within 10 s of a congestion signal; otherwise bursts as before.
+- Video budget = (target − audio send rate) / (1 + FEC rate) → `RungSelector`: down immediately
+  below 80% of the rung, else after 300 ms; up one rung after 2 s with 10% headroom. Each switch
+  re-opens the encoder (≈10–15 ms) and sends an IDR: FFmpeg's hevc_vaapi and libx265 ignore
+  mid-stream bitrate changes (verified). Frames are skipped while the pacer holds > 1.5 frame times.
+- FEC rate comes from the controller's loss estimate (the video-only loss report is gone).
+- The receiver's NACK quiet time is max(2 ms, 3× EWMA fragment gap), so paced frames aren't NACKed.
 
 ## Status
 - [x] **1 Skeleton**, **2 Signalling** — discovery, encrypted control channel, negotiation, UI.
@@ -71,12 +94,20 @@ feedback kinds: PLI, NACK (frame id + index, 0xffff = whole frame), loss report 
       default after a listening test: LBRR (default) vs DRED (`--audio-fec dred`; at 48 kbps /
       10 ms LBRR starves DRED's budget; 64 kbps allows both with ~30 ms DRED); (c) validate NACK/FEC
       under real delay with `netem.sh on wan` (needs sudo).
-- [ ] **6 Congestion control** — **next.** Transport-wide feedback (per-packet arrival times /
-      ECN), SCReAM-v2-style delay + L4S/ECN controller, encoder bitrate/resolution ladder, pacing
-      only when the link is the bottleneck (burst on LAN). Video bitrate is currently fixed
-      (12 Mbps default). Replace the video-only loss report with transport-wide feedback; feed the
-      FEC policy from it.
-- [ ] **7 Screen share** — PipeWire + xdg-desktop-portal capture (DMA-BUF), second stream
+- [x] **6 Congestion control** — design above. Results (pattern 720p30, max 8 Mbps, loopback):
+      no limit → stays at max, no pacing, no switches, capture→decoded ~8 ms; `--sim-rate 3000
+      --sim-delay 10` → settles at the 1.9 Mbps 720p rung (probes 2.7, backs off), p95 64 ms;
+      same + `--sim-ce 2` (L4S) → 1.35 Mbps, p95 30 ms; 5–10% random loss → rate untouched.
+      Simulated-link unit tests: 6 Mbps link → 92% utilisation, ~5 ms mean queue; L4S ~77%.
+      **Open:** (a) start-at-max into a slow link costs ~1 s of heavy loss + a few PLIs at call
+      start; (b) every rung change is an IDR because FFmpeg won't retarget the encoder live — a
+      native VA-API encoder (phase 9) would allow continuous rate changes; (c) audio and feedback bypass the pacer; (d) under `netem.sh on bottleneck`
+      (4 Mbit/s shared, both directions) the rate saw-tooths between steps (~1 switch / 2 s, each an
+      IDR); proposed fix: back off further step-up probes after a failed one.
+      Verified with real netem `bottleneck` + GUI (camera 1080p60 one way, pattern back):
+      `--cc off` → 87–90% loss, video ~1 frame / 30 s, 0.4–1 s latency, ~40% audio concealed;
+      `--cc on` → 59 fps both ways, p95 40–75 ms, audio <1% concealed, ~58 ms.
+- [ ] **7 Screen share** — **next.** PipeWire + xdg-desktop-portal capture (DMA-BUF), second stream
       (`kScreen`), "text" mode (full res, 5–30 fps, sharp) vs "motion" (60 fps), viewer UI.
       Negotiation already picks a codec per stream for screen.
 - [ ] **8 AV1 + negotiation matrix** — SVT-AV1 RTC preset with screen-content tools, dav1d,
@@ -89,7 +120,7 @@ feedback kinds: PLI, NACK (frame id + index, 0xffff = whole frame), loss report 
       CoreAudio via miniaudio, codesign + camera/mic/screen entitlements. Platform splits exist
       (`camera_none.cpp`, `codec_probe_generic.cpp`, `audio_device_none.cpp`).
 
-Also outstanding: active A/V sync (latencies are reported only).
+Also outstanding: active A/V sync (latencies are reported only); the AV1 software encoder bug below.
 
 ## Gotchas learned
 - `qt6-base-private-dev` is required for `rhi/qrhi.h`; link `Qt6::GuiPrivate` (in 6.8 it comes
@@ -98,3 +129,10 @@ Also outstanding: active A/V sync (latencies are reported only).
 - Debian's libopus lacks DRED; the local static build interposes over the copy libavcodec loads.
 - Tests must never open the real camera (they use the pattern source at 1280×720@30).
 - Someone else may edit files concurrently: re-read before editing and keep their changes.
+- FFmpeg hevc_vaapi sends rate-control params only at IDR and libx265 doesn't reconfigure: changing
+  `bit_rate` mid-stream does nothing (measured). Mesa CBR pads every frame, IDRs included, to ≈ the
+  per-frame budget, so keyframes are not bursts.
+- ECN on loopback works without root: socket TOS 0xB9 (EF + ECT(1)) arrives intact, a per-packet
+  `IP_TOS` cmsg can set CE, and `IP_RECVTOS` on the dual-stack socket reports it for v4-mapped peers.
+- **Bug for phase 8:** `libsvtav1` (2.3) refuses to open with `rc_max_rate` set ("Max Bitrate only
+  supported with CRF mode"), so AV1 software encode (`--prefer-av1`) currently fails. Pre-existing.

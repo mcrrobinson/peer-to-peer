@@ -13,6 +13,7 @@
 #include <sys/socket.h>
 #include <unistd.h>
 
+#include <algorithm>
 #include <cerrno>
 #include <cstring>
 
@@ -23,6 +24,14 @@ namespace p2p::net {
 using namespace wire;
 
 namespace {
+constexpr uint8_t kDscpEf = 0xB8;
+constexpr uint8_t kEct1 = 1;
+constexpr uint8_t kCe = 3;
+constexpr size_t kIpUdpOverhead = 28;
+constexpr int64_t kFeedbackIntervalUs = 10'000;
+constexpr size_t kFeedbackEarlyPackets = 200;
+constexpr int64_t kPacerBurstUs = 1'000; // credit a late pacer may catch up on
+
 void putU64(uint8_t* p, uint64_t v)
 {
     for (int i = 7; i >= 0; --i) { p[i] = uint8_t(v); v >>= 8; }
@@ -98,11 +107,14 @@ bool MediaTransport::open(uint16_t port, QString* error)
     int buf = 4 << 20;
     ::setsockopt(fd_, SOL_SOCKET, SO_RCVBUF, &buf, sizeof(buf));
     ::setsockopt(fd_, SOL_SOCKET, SO_SNDBUF, &buf, sizeof(buf));
-    // DSCP EF for the whole socket for now; per-stream marking comes with
-    // the congestion controller. Failures are harmless.
-    int tos = 0xB8;
+    // DSCP EF + ECT(1) (L4S) on everything; we read the ECN field of what
+    // arrives for the peer's congestion controller. Failures are harmless.
+    int tos = kDscpEf | kEct1;
     ::setsockopt(fd_, IPPROTO_IP, IP_TOS, &tos, sizeof(tos));
     ::setsockopt(fd_, IPPROTO_IPV6, IPV6_TCLASS, &tos, sizeof(tos));
+    int on = 1;
+    ::setsockopt(fd_, IPPROTO_IP, IP_RECVTOS, &on, sizeof(on));
+    ::setsockopt(fd_, IPPROTO_IPV6, IPV6_RECVTCLASS, &on, sizeof(on));
 
     sockaddr_in6 sa{};
     sa.sin6_family = AF_INET6;
@@ -137,10 +149,12 @@ bool MediaTransport::setRemote(const QHostAddress& addr, uint16_t port)
         sa.sin6_addr.s6_addr[13] = uint8_t(v4 >> 16);
         sa.sin6_addr.s6_addr[14] = uint8_t(v4 >> 8);
         sa.sin6_addr.s6_addr[15] = uint8_t(v4);
+        remoteV4_ = true;
     } else if (addr.protocol() == QAbstractSocket::IPv6Protocol) {
         const Q_IPV6ADDR a = addr.toIPv6Address();
         std::memcpy(sa.sin6_addr.s6_addr, a.c, 16);
         sa.sin6_scope_id = addr.scopeId().toUInt();
+        remoteV4_ = false;
     } else {
         return false;
     }
@@ -159,25 +173,96 @@ void MediaTransport::setFeedbackHandler(uint8_t streamId, Handler h)
     feedbackHandlers_[streamId] = std::move(h);
 }
 
+void MediaTransport::setCongestionControl(const cc::CongestionController::Config& cfg, bool enabled)
+{
+    std::lock_guard l(ccMutex_);
+    cc_ = cc::CongestionController(cfg);
+    ccEnabled_ = enabled;
+}
+
 bool MediaTransport::start()
 {
     if (fd_ < 0 || running_) return false;
     running_ = true;
     thread_ = std::thread([this] { recvLoop(); });
+    pacerThread_ = std::thread([this] { pacerLoop(); });
+    if (linkSim_.active()) simThread_ = std::thread([this] { simLoop(); });
     return true;
 }
 
 void MediaTransport::stop()
 {
     running_ = false;
+    pacerCv_.notify_all();
+    simCv_.notify_all();
     if (thread_.joinable()) thread_.join();
+    if (pacerThread_.joinable()) pacerThread_.join();
+    if (simThread_.joinable()) simThread_.join();
 }
 
 bool MediaTransport::send(uint8_t type, uint8_t streamId, const uint8_t* payload, size_t len)
 {
+    return transmit(type, streamId, payload, len);
+}
+
+bool MediaTransport::sendPaced(uint8_t type, uint8_t streamId, const uint8_t* payload, size_t len)
+{
+    if (len > kMaxPayload) return false;
+    if (!ccEnabled_) return transmit(type, streamId, payload, len);
+    {
+        std::unique_lock l(pacerMutex_);
+        // Keep order: once something is queued, everything queues behind it.
+        if (pacerQueue_.empty() && pacingBps_.load(std::memory_order_relaxed) == 0) {
+            l.unlock();
+            return transmit(type, streamId, payload, len);
+        }
+        Queued& q = pacerQueue_.emplace_back();
+        q.type = type;
+        q.stream = streamId;
+        q.len = uint16_t(len);
+        std::memcpy(q.data, payload, len);
+        pacerBytes_ += len;
+    }
+    pacerCv_.notify_one();
+    return true;
+}
+
+void MediaTransport::pacerLoop()
+{
+    Queued q;
+    while (running_.load(std::memory_order_relaxed)) {
+        {
+            std::unique_lock l(pacerMutex_);
+            pacerCv_.wait_for(l, std::chrono::milliseconds(50), [&] { return !pacerQueue_.empty() || !running_; });
+            if (pacerQueue_.empty()) continue;
+            q = pacerQueue_.front();
+            pacerQueue_.pop_front();
+            pacerBytes_ -= q.len;
+        }
+        const int64_t rate = pacingBps_.load(std::memory_order_relaxed);
+        if (rate > 0) {
+            const int64_t now = nowUs();
+            if (pacerNextUs_ > now) std::this_thread::sleep_for(std::chrono::microseconds(pacerNextUs_ - now));
+            pacerNextUs_ = std::max(pacerNextUs_, now - kPacerBurstUs) +
+                           int64_t(double(q.len + kHeaderSize + kTagSize + kIpUdpOverhead) * 8e6 / double(rate));
+        }
+        transmit(q.type, q.stream, q.data, q.len);
+    }
+}
+
+int64_t MediaTransport::pacerQueueUs() const
+{
+    const int64_t rate = pacingBps_.load(std::memory_order_relaxed);
+    std::lock_guard l(pacerMutex_);
+    if (rate <= 0 || pacerBytes_ == 0) return 0;
+    return int64_t(double(pacerBytes_) * 8e6 / double(rate));
+}
+
+bool MediaTransport::transmit(uint8_t type, uint8_t streamId, const uint8_t* payload, size_t len)
+{
     if (fd_ < 0 || remoteLen_ == 0 || len > kMaxPayload) return false;
 
-    uint8_t pkt[kHeaderSize + kMaxPayload + kTagSize];
+    uint8_t pkt[kMaxDatagram];
     const uint64_t pn = nextPn_.fetch_add(1, std::memory_order_relaxed);
     pkt[0] = uint8_t((kVersion << 6) | (type & 0x3f));
     pkt[1] = streamId;
@@ -191,13 +276,46 @@ bool MediaTransport::send(uint8_t type, uint8_t streamId, const uint8_t* payload
                                               nullptr, nonce, tx_.data());
     const size_t total = kHeaderSize + size_t(clen);
 
+    if (type == kMedia) {
+        std::lock_guard l(ccMutex_);
+        cc_.onPacketSent(pn, nowUs(), total + kIpUdpOverhead, streamId);
+    }
+
     if (simLoss_ > 0 && simulateDrop()) {
         st_.simDropped.fetch_add(1, std::memory_order_relaxed);
         return true;
     }
 
-    const ssize_t n = ::sendto(fd_, pkt, total, 0, reinterpret_cast<const sockaddr*>(remote_), remoteLen_);
-    if (n != ssize_t(total)) {
+    if (linkSim_.active()) {
+        {
+            std::lock_guard l(simLinkMutex_);
+            const int64_t now = nowUs();
+            const int64_t start = std::max(now, simLinkFreeUs_);
+            const int64_t queued = start - now;
+            if (linkSim_.rateBps > 0 && queued > linkSim_.queueUs) {
+                st_.simQueueDrops.fetch_add(1, std::memory_order_relaxed);
+                return true;
+            }
+            if (linkSim_.rateBps > 0)
+                simLinkFreeUs_ = start + int64_t(double(total + kIpUdpOverhead) * 8e6 / double(linkSim_.rateBps));
+            else
+                simLinkFreeUs_ = now;
+            SimPacket& sp = simQueue_.emplace_back();
+            sp.atUs = simLinkFreeUs_ + linkSim_.delayUs;
+            // Like DualPI2's step marking, never mark below ~2 packets of queue.
+            const int64_t twoPackets =
+                linkSim_.rateBps > 0 ? int64_t(2 * double(kMaxDatagram + kIpUdpOverhead) * 8e6 / double(linkSim_.rateBps)) : 0;
+            sp.ecn = linkSim_.ceThresholdUs > 0 && queued > std::max(linkSim_.ceThresholdUs, twoPackets) ? kCe : kEct1;
+            sp.len = uint16_t(total);
+            std::memcpy(sp.data, pkt, total);
+        }
+        simCv_.notify_one();
+        st_.packetsSent.fetch_add(1, std::memory_order_relaxed);
+        st_.bytesSent.fetch_add(total, std::memory_order_relaxed);
+        return true;
+    }
+
+    if (!sendDatagram(pkt, total, -1)) {
         st_.sendErrors.fetch_add(1, std::memory_order_relaxed);
         return false;
     }
@@ -206,17 +324,116 @@ bool MediaTransport::send(uint8_t type, uint8_t streamId, const uint8_t* payload
     return true;
 }
 
+bool MediaTransport::sendDatagram(const uint8_t* pkt, size_t len, int ecn)
+{
+    if (ecn < 0)
+        return ::sendto(fd_, pkt, len, 0, reinterpret_cast<const sockaddr*>(remote_), remoteLen_) == ssize_t(len);
+    iovec iov{const_cast<uint8_t*>(pkt), len};
+    msghdr m{};
+    m.msg_name = remote_;
+    m.msg_namelen = remoteLen_;
+    m.msg_iov = &iov;
+    m.msg_iovlen = 1;
+    alignas(cmsghdr) unsigned char cbuf[CMSG_SPACE(sizeof(int))];
+    m.msg_control = cbuf;
+    m.msg_controllen = sizeof(cbuf);
+    cmsghdr* c = CMSG_FIRSTHDR(&m);
+    c->cmsg_level = remoteV4_ ? IPPROTO_IP : IPPROTO_IPV6;
+    c->cmsg_type = remoteV4_ ? IP_TOS : IPV6_TCLASS;
+    c->cmsg_len = CMSG_LEN(sizeof(int));
+    const int tos = kDscpEf | (ecn & 3);
+    std::memcpy(CMSG_DATA(c), &tos, sizeof(tos));
+    return ::sendmsg(fd_, &m, 0) == ssize_t(len);
+}
+
+void MediaTransport::simLoop()
+{
+    SimPacket p;
+    while (running_.load(std::memory_order_relaxed)) {
+        {
+            std::unique_lock l(simLinkMutex_);
+            simCv_.wait_for(l, std::chrono::milliseconds(50), [&] { return !simQueue_.empty() || !running_; });
+            if (simQueue_.empty()) continue;
+            p = simQueue_.front();
+            simQueue_.pop_front();
+        }
+        const int64_t wait = p.atUs - nowUs();
+        if (wait > 0) std::this_thread::sleep_for(std::chrono::microseconds(wait));
+        if (!sendDatagram(p.data, p.len, p.ecn)) st_.sendErrors.fetch_add(1, std::memory_order_relaxed);
+    }
+}
+
+void MediaTransport::refreshPacing(int64_t now)
+{
+    // ccMutex_ held.
+    pacingBps_.store(ccEnabled_ ? cc_.pacingBps(now) : 0, std::memory_order_relaxed);
+}
+
+void MediaTransport::maybeSendFeedback(int64_t now)
+{
+    if (!feedback_.hasNew()) return;
+    if (now - lastFeedbackUs_ < kFeedbackIntervalUs && feedback_.newCount() < kFeedbackEarlyPackets) return;
+    auto fb = feedback_.build(now, cc::TransportFeedback::maxEntries(kMaxPayload));
+    lastFeedbackUs_ = now;
+    if (!fb) return;
+    uint8_t buf[kMaxPayload];
+    const size_t n = fb->serialize(buf, sizeof(buf));
+    if (n && transmit(kTransportFeedback, 0, buf, n)) st_.feedbackSent.fetch_add(1, std::memory_order_relaxed);
+}
+
+int64_t MediaTransport::targetBps() const
+{
+    std::lock_guard l(ccMutex_);
+    return cc_.targetBps();
+}
+
+int64_t MediaTransport::streamBps(uint8_t streamId) const
+{
+    std::lock_guard l(ccMutex_);
+    return cc_.streamBps(streamId);
+}
+
+cc::CongestionController::Stats MediaTransport::ccStats() const
+{
+    std::lock_guard l(ccMutex_);
+    return cc_.stats(nowUs());
+}
+
 void MediaTransport::recvLoop()
 {
     uint8_t pkt[2048];
     uint8_t plain[2048];
+    alignas(cmsghdr) unsigned char cbuf[256];
     pollfd pfd{fd_, POLLIN, 0};
     while (running_.load(std::memory_order_relaxed)) {
-        if (::poll(&pfd, 1, 50) <= 0) continue;
+        int timeoutMs = 50;
+        if (feedback_.hasNew())
+            timeoutMs = int(std::clamp<int64_t>((lastFeedbackUs_ + kFeedbackIntervalUs - nowUs() + 999) / 1000, 0, 50));
+        if (::poll(&pfd, 1, timeoutMs) <= 0) {
+            maybeSendFeedback(nowUs());
+            continue;
+        }
         for (;;) {
-            const ssize_t n = ::recv(fd_, pkt, sizeof(pkt), 0);
+            iovec iov{pkt, sizeof(pkt)};
+            msghdr m{};
+            m.msg_iov = &iov;
+            m.msg_iovlen = 1;
+            m.msg_control = cbuf;
+            m.msg_controllen = sizeof(cbuf);
+            const ssize_t n = ::recvmsg(fd_, &m, 0);
             if (n < 0) break; // EAGAIN or transient error
             const int64_t arrival = nowUs();
+            uint8_t ecn = 0;
+            for (cmsghdr* c = CMSG_FIRSTHDR(&m); c; c = CMSG_NXTHDR(&m, c)) {
+                // IP_TOS arrives as one byte, IPV6_TCLASS as an int.
+                if (c->cmsg_level == IPPROTO_IP && c->cmsg_type == IP_TOS) {
+                    ecn = *CMSG_DATA(c) & 3;
+                } else if (c->cmsg_level == IPPROTO_IPV6 && c->cmsg_type == IPV6_TCLASS) {
+                    int v = 0;
+                    std::memcpy(&v, CMSG_DATA(c), sizeof(v));
+                    ecn = uint8_t(v & 3);
+                }
+            }
             if (size_t(n) < kHeaderSize + kTagSize || (pkt[0] >> 6) != kVersion) {
                 st_.malformed.fetch_add(1, std::memory_order_relaxed);
                 continue;
@@ -240,13 +457,28 @@ void MediaTransport::recvLoop()
             if (pn > rxHighestPn_.load(std::memory_order_relaxed)) rxHighestPn_.store(pn, std::memory_order_relaxed);
             st_.packetsReceived.fetch_add(1, std::memory_order_relaxed);
             st_.bytesReceived.fetch_add(uint64_t(n), std::memory_order_relaxed);
+            if (ecn == kCe) st_.ceReceived.fetch_add(1, std::memory_order_relaxed);
             const uint8_t type = pkt[0] & 0x3f;
             const uint8_t stream = pkt[1];
+            if (type == kTransportFeedback) {
+                st_.feedbackReceived.fetch_add(1, std::memory_order_relaxed);
+                if (auto fb = cc::TransportFeedback::parse(plain, size_t(plen))) {
+                    std::lock_guard l(ccMutex_);
+                    cc_.onFeedback(*fb, arrival);
+                    refreshPacing(arrival);
+                }
+                continue;
+            }
+            feedback_.onPacket(pn, arrival, ecn);
             if (type == kMedia && handlers_[stream])
                 handlers_[stream](plain, size_t(plen), arrival);
             else if (type == kFeedback && feedbackHandlers_[stream])
                 feedbackHandlers_[stream](plain, size_t(plen), arrival);
         }
+        maybeSendFeedback(nowUs());
+        // The pacing hold expires with time, not only with feedback.
+        std::lock_guard l(ccMutex_);
+        refreshPacing(nowUs());
     }
 }
 
@@ -256,7 +488,8 @@ MediaTransport::Stats MediaTransport::stats() const
     const uint64_t first = r(rxFirstPn_), highest = r(rxHighestPn_);
     return {r(st_.packetsSent),     r(st_.bytesSent),    r(st_.sendErrors), r(st_.simDropped),
             r(st_.packetsReceived), r(st_.bytesReceived), r(st_.authFailures), r(st_.replays),
-            r(st_.malformed),       first ? highest - first + 1 : 0};
+            r(st_.malformed),       first ? highest - first + 1 : 0,
+            r(st_.feedbackSent),    r(st_.feedbackReceived), r(st_.ceReceived), r(st_.simQueueDrops)};
 }
 
 bool MediaTransport::simulateDrop()

@@ -23,6 +23,7 @@ public:
         video::VideoStreamConfig video;
         double simulatedLoss = 0.0; // fraction of outgoing packets to drop (testing)
         double simulatedBurst = 1.0; // mean loss burst length in packets (testing)
+        net::MediaTransport::LinkSim linkSim; // simulated bottleneck on outgoing media (testing)
     };
 
     explicit MediaSession(Config cfg);

@@ -20,7 +20,10 @@ Headless/scripted: `p2pcall --headless --instance 2 --auto-accept --exit-after-c
 `--video-source camera|pattern|none` (only one instance can hold the camera; use `pattern` for the
 other), `--video-size 1920x1080 --video-fps 60 --video-bitrate 12000 --camera-format auto|mjpeg|nv12`.
 Loss recovery: `--fec auto|off|<pct>`, `--no-nack`. Simulated loss: `--sim-loss <pct> --sim-burst <n>`.
-Real delay/jitter needs root: `sudo tests/net/netem.sh on wan` … `sudo tests/net/netem.sh off`.
+Real delay/jitter needs root: `sudo tests/net/netem.sh on wan|bottleneck` … `sudo tests/net/netem.sh off`.
+Congestion control is on by default (`--cc off` = fixed bitrate; `--video-bitrate` is then the maximum,
+`--min-video-bitrate` the floor). Simulated bottleneck on outgoing media, no root needed:
+`--sim-rate <kbps> --sim-delay <ms> --sim-queue <ms>`, plus `--sim-ce <ms>` for L4S-style CE marking.
 Opus DRED needs a libopus built with it: `tools/build-opus-dred.sh`, then re-run `cmake --preset dev`;
 `--audio-fec lbrr|dred` picks in-band FEC (one frame, full quality) or DRED (bursts, vocoder quality).
 
@@ -33,9 +36,11 @@ Opus DRED needs a libopus built with it: `tools/build-opus-dred.sh`, then re-run
 - [~] Phase 5: NACK retransmission, adaptive Reed-Solomon FEC, keyframe fallback, burst-loss simulation, netem
       script, Opus DRED (`--audio-fec dred`, needs the local libopus build). Not yet: intra refresh / LTR
       (need a native VA-API encoder backend).
-- [ ] Phase 6: congestion control · 7: screen share · 8: AV1 · 9: latency work · 10: macOS
+- [x] Phase 6: transport-wide feedback (arrival times + ECN), SCReAM-v2-style delay/L4S controller, pacing
+      only when the link is the bottleneck, encoder bitrate/resolution ladder, FEC driven by the controller.
+- [ ] Phase 7: screen share · 8: AV1 · 9: latency work · 10: macOS
 
 ## Layout
-`src/net` (crypto, control channel, discovery, media transport, FEC) · `src/media` (codec caps/negotiation) ·
+`src/net` (crypto, control channel, discovery, media transport, FEC, `cc/` congestion control) · `src/media` (codec caps/negotiation) ·
 `src/audio` (devices, Opus, jitter buffer) · `src/video` (capture, codecs, packetizer, streams) ·
 `src/app` (CallController, MediaSession, VideoView, main) · `qml/` · `shaders/` · `tests/` · `tools/`

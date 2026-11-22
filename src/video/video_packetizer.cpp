@@ -148,6 +148,16 @@ void FrameAssembler::insert(const FragmentHeader& h, const uint8_t* data, size_t
         haveHighest_ = true;
     }
     missing_.erase(h.frameId);
+    // Typical spacing of one frame's fragments (wide when the sender paces).
+    if (!(h.flags & FragmentHeader::kRetransmit)) {
+        if (haveLastFragment_ && lastFragmentFrame_ == h.frameId) {
+            const int64_t gap = std::clamp<int64_t>(arrivalUs - lastFragmentUs_, 0, 50'000);
+            fragmentGapUs_ = fragmentGapUs_ ? (7 * fragmentGapUs_ + gap) / 8 : gap;
+        }
+        haveLastFragment_ = true;
+        lastFragmentFrame_ = h.frameId;
+        lastFragmentUs_ = arrivalUs;
+    }
     if (ready_.count(h.frameId)) return; // duplicate of a completed frame
 
     auto it = partial_.find(h.frameId);
@@ -348,7 +358,9 @@ std::vector<NackItem> FrameAssembler::collectNacks(int64_t nowUs, const NackPoli
     // Holes inside frames we have part of.
     for (auto& [id, p] : partial_) {
         if (haveNext_ && int32_t(id - nextId_) < 0) continue;
-        if (nowUs - p.lastArrivalUs < policy.reorderUs) continue;
+        // A paced frame arrives spread out: wait for a few fragment gaps,
+        // not just the fixed reorder time.
+        if (nowUs - p.lastArrivalUs < std::max(policy.reorderUs, 3 * fragmentGapUs_)) continue;
         const FragmentHeader& h = p.first;
         // While waiting to resync only a keyframe helps.
         if (!haveNext_ && !(h.flags & FragmentHeader::kKeyframe)) continue;

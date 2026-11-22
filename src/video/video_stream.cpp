@@ -5,6 +5,10 @@
 
 #include <QLoggingCategory>
 
+extern "C" {
+#include <libswscale/swscale.h>
+}
+
 #include <algorithm>
 #include <cstring>
 #include <vector>
@@ -16,7 +20,7 @@ namespace p2p::video {
 namespace {
 constexpr int64_t kPliIntervalUs = 100'000;
 constexpr size_t kLatencyWindow = 240;
-constexpr int64_t kLossReportIntervalUs = 200'000;
+constexpr int64_t kPathLossIntervalUs = 200'000;
 constexpr int64_t kHistoryUs = 1'000'000;
 constexpr size_t kHistoryMaxBytes = 32u << 20;
 constexpr size_t kNackEntry = 6;
@@ -64,6 +68,7 @@ VideoSendStream::VideoSendStream(VideoStreamConfig cfg, media::StreamSelection s
 VideoSendStream::~VideoSendStream()
 {
     stop();
+    sws_freeContext(sws_);
 }
 
 void VideoSendStream::attach()
@@ -79,16 +84,6 @@ void VideoSendStream::onFeedback(const uint8_t* d, size_t n)
         forceKeyframe_ = true;
         std::lock_guard l(statsMutex_);
         ++st_.pliReceived;
-        return;
-    }
-    case VideoFeedback::LossReport: {
-        if (n < 3) return;
-        const double loss = std::min(1.0, getU16(d + 1) / 10000.0);
-        // Fast attack, slow decay.
-        const double prev = lossEstimate_.load();
-        lossEstimate_ = loss > prev ? loss : prev * 0.8 + loss * 0.2;
-        std::lock_guard l(statsMutex_);
-        st_.reportedLoss = loss;
         return;
     }
     case VideoFeedback::Nack: {
@@ -129,7 +124,7 @@ void VideoSendStream::resend(const std::vector<uint8_t>& payload)
     uint8_t buf[2048];
     std::memcpy(buf, payload.data(), payload.size());
     buf[16] |= FragmentHeader::kRetransmit; // flags byte
-    transport_.send(net::wire::kMedia, streamId_, buf, payload.size());
+    transport_.sendPaced(net::wire::kMedia, streamId_, buf, payload.size());
 }
 
 bool VideoSendStream::start(QString* error)
@@ -166,6 +161,51 @@ void VideoSendStream::stop()
     FrameHub::instance().clear(previewName_);
 }
 
+bool VideoSendStream::openEncoder(const Rung& r, int fps)
+{
+    const int64_t t0 = nowUs();
+    VideoEncoder::Config ec;
+    ec.codec = sel_.codec;
+    ec.hardware = sel_.encoderHw;
+    ec.width = r.width;
+    ec.height = r.height;
+    ec.fps = fps;
+    ec.bitrateKbps = r.kbps;
+    auto enc = std::make_unique<VideoEncoder>();
+    QString err;
+    if (!enc->init(ec, &err)) {
+        qCWarning(lcVideo).noquote() << "video encoder failed:" << err;
+        return false;
+    }
+    encoder_ = std::move(enc);
+    const double ms = double(nowUs() - t0) / 1000.0;
+    std::lock_guard l(statsMutex_);
+    st_.encoder = encoder_->name();
+    st_.width = r.width;
+    st_.height = r.height;
+    st_.rungKbps = r.kbps;
+    if (ladder_) st_.rungIndex = ladder_->index();
+    st_.reopenMaxMs = std::max(st_.reopenMaxMs, ms);
+    return true;
+}
+
+const VideoFrame* VideoSendStream::scaled(const VideoFrame& f, int w, int h)
+{
+    if (f.width == w && f.height == h) return &f;
+    sws_ = sws_getCachedContext(sws_, f.width, f.height, AV_PIX_FMT_NV12, w, h, AV_PIX_FMT_NV12, SWS_BILINEAR,
+                                nullptr, nullptr, nullptr);
+    if (!sws_) return nullptr;
+    if (scaledFrame_.width != w || scaledFrame_.height != h) scaledFrame_.allocate(w, h);
+    const uint8_t* src[2] = {f.y(), f.uv()};
+    const int srcStride[2] = {f.width, f.width};
+    uint8_t* dst[2] = {scaledFrame_.y(), scaledFrame_.uv()};
+    const int dstStride[2] = {w, w};
+    sws_scale(sws_, src, srcStride, 0, f.height, dst, dstStride);
+    scaledFrame_.captureUs = f.captureUs;
+    scaledFrame_.id = f.id;
+    return &scaledFrame_;
+}
+
 void VideoSendStream::onFrame(std::shared_ptr<VideoFrame> f)
 {
     FrameHub::instance().publish(previewName_, f);
@@ -175,27 +215,49 @@ void VideoSendStream::onFrame(std::shared_ptr<VideoFrame> f)
     }
     if (encoderFailed_) return;
 
-    if (!encoder_) {
-        VideoEncoder::Config ec;
-        ec.codec = sel_.codec;
-        ec.hardware = sel_.encoderHw;
-        ec.width = f->width;
-        ec.height = f->height;
-        ec.fps = source_ ? std::max(1, source_->fps()) : 60;
-        ec.bitrateKbps = cfg_.bitrateKbps;
-        encoder_ = std::make_unique<VideoEncoder>();
-        QString err;
-        if (!encoder_->init(ec, &err)) {
-            qCWarning(lcVideo).noquote() << "video encoder failed:" << err;
+    const int fps = source_ ? std::max(1, source_->fps()) : 60;
+    const bool cc = cfg_.congestionControl && transport_.congestionControlEnabled();
+    const int64_t now = nowUs();
+    lossEstimate_ = transport_.ccStats().lossRate;
+
+    if (!ladder_) {
+        auto rungs = cc ? buildLadder(cfg_.bitrateKbps, cfg_.minBitrateKbps, f->width, f->height, fps)
+                        : std::vector<Rung>{{cfg_.bitrateKbps, f->width, f->height}};
+        ladder_ = std::make_unique<RungSelector>(std::move(rungs));
+        std::lock_guard l(statsMutex_);
+        st_.rungCount = int(ladder_->ladder().size());
+    }
+    if (cc) {
+        // What the controller leaves for this encoder: minus audio, minus FEC overhead.
+        const double avail = double(transport_.targetBps() - transport_.streamBps(net::wire::kAudio));
+        const double budget = std::max(0.0, avail) / (1.0 + lastFecRate_) / 1000.0;
+        if (ladder_->update(budget, now)) {
+            const auto& r = ladder_->rung();
+            qCInfo(lcVideo).noquote() << QStringLiteral("rate ladder -> %1 kbps %2x%3 (budget %4 kbps)")
+                                             .arg(r.kbps)
+                                             .arg(r.width)
+                                             .arg(r.height)
+                                             .arg(budget, 0, 'f', 0);
             encoder_.reset();
-            encoderFailed_ = true;
+        }
+        {
+            std::lock_guard l(statsMutex_);
+            st_.budgetKbps = budget;
+            st_.rungSwitches = ladder_->switches();
+        }
+        // Don't stack frames behind a backed-up pacer: skip this one.
+        if (transport_.pacerQueueUs() > 1'500'000 / fps) {
+            std::lock_guard l(statsMutex_);
+            ++st_.framesSkipped;
             return;
         }
-        std::lock_guard l(statsMutex_);
-        st_.encoder = encoder_->name();
-        st_.width = f->width;
-        st_.height = f->height;
     }
+    if (!encoder_ && !openEncoder(ladder_->rung(), fps)) {
+        encoderFailed_ = true;
+        return;
+    }
+    const VideoFrame* in = scaled(*f, ladder_->rung().width, ladder_->rung().height);
+    if (!in) return;
 
     const bool key = forceKeyframe_.exchange(false);
     const int64_t t0 = nowUs();
@@ -203,13 +265,13 @@ void VideoSendStream::onFrame(std::shared_ptr<VideoFrame> f)
     bool wasKey = false;
     double fecRate = 0;
     const uint8_t codecId = uint8_t(sel_.codec);
-    const bool ok = encoder_->encode(*f, key, [&](const uint8_t* data, size_t size, bool isKey) {
+    const bool ok = encoder_->encode(*in, key, [&](const uint8_t* data, size_t size, bool isKey) {
         wasKey |= isKey;
         bytes += size;
         PacketizeOptions opt;
         opt.extraFlags = sendingPattern_ ? FragmentHeader::kTestPattern : 0;
-        opt.width = uint16_t(f->width);
-        opt.height = uint16_t(f->height);
+        opt.width = uint16_t(in->width);
+        opt.height = uint16_t(in->height);
         switch (cfg_.fec) {
         case VideoStreamConfig::Fec::Off: break;
         case VideoStreamConfig::Fec::Auto: opt.fecRate = autoFecRate(lossEstimate_.load(), isKey); break;
@@ -223,7 +285,7 @@ void VideoSendStream::onFrame(std::shared_ptr<VideoFrame> f)
         packetizeFrame(
             sent.id, f->captureUs, isKey, codecId, data, size, net::wire::kMaxPayload,
             [&](const uint8_t* p, size_t n) {
-                transport_.send(net::wire::kMedia, streamId_, p, n);
+                transport_.sendPaced(net::wire::kMedia, streamId_, p, n);
                 auto h = FragmentHeader::read(p, n);
                 if (h && h->isParity()) {
                     ++parity;
@@ -257,6 +319,8 @@ void VideoSendStream::onFrame(std::shared_ptr<VideoFrame> f)
     st_.bytes += bytes;
     st_.parityFragments += parity;
     st_.fecRate = fecRate;
+    st_.reportedLoss = lossEstimate_.load();
+    lastFecRate_ = fecRate;
     encodeSumMs_ += ms;
     st_.encodeAvgMs = encodeSumMs_ / double(st_.encoded);
     st_.encodeMaxMs = std::max(st_.encodeMaxMs, ms);
@@ -348,9 +412,11 @@ void VideoReceiveStream::sendNacks(const std::vector<NackItem>& items)
     }
 }
 
-void VideoReceiveStream::maybeReportLoss(int64_t now)
+// Path loss before recovery, for display (the sender learns about loss
+// from transport-wide feedback).
+void VideoReceiveStream::updatePathLoss(int64_t now)
 {
-    if (now - lastReportUs_ < kLossReportIntervalUs) return;
+    if (now - lastReportUs_ < kPathLossIntervalUs) return;
     lastReportUs_ = now;
     const auto t = transport_.stats();
     const uint64_t exp = t.packetsExpected - reportExpected_, rec = t.packetsReceived - reportReceived_;
@@ -358,9 +424,6 @@ void VideoReceiveStream::maybeReportLoss(int64_t now)
     reportReceived_ = t.packetsReceived;
     if (exp == 0) return;
     const double loss = rec >= exp ? 0.0 : double(exp - rec) / double(exp);
-    uint8_t msg[3] = {uint8_t(VideoFeedback::LossReport)};
-    putU16(msg + 1, uint16_t(std::min(10000.0, loss * 10000.0 + 0.5)));
-    transport_.send(net::wire::kFeedback, streamId_, msg, sizeof(msg));
     std::lock_guard l(statsMutex_);
     st_.pathLoss = loss;
 }
@@ -397,7 +460,7 @@ void VideoReceiveStream::decodeLoop()
             st_.assembler = assembler_.stats();
         }
         if (!nacks.empty()) sendNacks(nacks);
-        maybeReportLoss(nowUs());
+        updatePathLoss(nowUs());
         // The sender opens with a keyframe, so before the first decode give
         // FEC / NACK the same grace a later loss gets; after that the
         // assembler has already waited when it reports a loss.

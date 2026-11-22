@@ -35,6 +35,12 @@ bool MediaSession::start(const crypto::SessionKeys& keys, const QHostAddress& re
         return false;
     }
     transport_.setSimulatedLoss(cfg_.simulatedLoss, cfg_.simulatedBurst);
+    transport_.setLinkSim(cfg_.linkSim);
+    // The controller's range covers video (max with FEC headroom, min) plus audio.
+    net::cc::CongestionController::Config cc;
+    cc.maxBps = int64_t(cfg_.video.bitrateKbps) * 1250 + 150'000;
+    cc.minBps = int64_t(cfg_.video.minBitrateKbps) * 1000 + 80'000;
+    transport_.setCongestionControl(cc, cfg_.video.congestionControl);
 
     audio_ = std::make_unique<audio::AudioPipeline>(cfg_.audio, transport_);
     audio_->attach();
@@ -130,7 +136,8 @@ QString MediaSession::statsText() const
     if (videoSend_) {
         const auto v = videoSend_->stats();
         s += QStringLiteral("\nvideo tx %1 %2x%3 %4 fps %5 kbps | enc %6 avg %7 ms max %8 ms | key %9 pli-rx %10\n"
-                            "     src %11\n     loss rep %12% | fec %13% (%14 parity) | nack items %15 resent %16 miss %17")
+                            "     src %11\n     loss est %12% | fec %13% (%14 parity) | nack items %15 resent %16 miss %17\n"
+                            "     ladder rung %18/%19 %20 kbps (budget %21) switches %22 reopen max %23 ms | skipped %24")
                  .arg(v.encoder)
                  .arg(v.width)
                  .arg(v.height)
@@ -147,7 +154,14 @@ QString MediaSession::statsText() const
                  .arg(v.parityFragments)
                  .arg(v.nackItems)
                  .arg(v.retransmitted)
-                 .arg(v.retransmitMisses);
+                 .arg(v.retransmitMisses)
+                 .arg(v.rungIndex + 1)
+                 .arg(v.rungCount)
+                 .arg(v.rungKbps)
+                 .arg(v.budgetKbps, 0, 'f', 0)
+                 .arg(v.rungSwitches)
+                 .arg(v.reopenMaxMs, 0, 'f', 1)
+                 .arg(v.framesSkipped);
     }
     if (videoRecv_) {
         const auto v = videoRecv_->stats();
@@ -176,6 +190,24 @@ QString MediaSession::statsText() const
                  .arg(v.assembler.retransmitsReceived)
                  .arg(v.assembler.nacked);
     }
+    {
+        const auto c = transport_.ccStats();
+        s += QStringLiteral("\ncc %1 target %2 kbps delivered %3 | qdelay %4 ms srtt %5 ms | loss %6% (lost %7 "
+                            "reordered %8) ce %9 | events delay %10 loss %11 ce %12 | pacing %13")
+                 .arg(transport_.congestionControlEnabled() ? QStringLiteral("on") : QStringLiteral("off"))
+                 .arg(c.targetBps / 1000)
+                 .arg(c.deliveredBps / 1000)
+                 .arg(double(c.queueDelayUs) / 1000.0, 0, 'f', 1)
+                 .arg(double(c.srttUs) / 1000.0, 0, 'f', 1)
+                 .arg(c.lossRate * 100, 0, 'f', 2)
+                 .arg(c.lost)
+                 .arg(c.spuriousLost)
+                 .arg(c.ceMarked)
+                 .arg(c.delayEvents)
+                 .arg(c.lossEvents)
+                 .arg(c.ceEvents)
+                 .arg(c.pacingBps > 0 ? QStringLiteral("%1 kbps").arg(c.pacingBps / 1000) : QStringLiteral("off"));
+    }
     s += QStringLiteral("\nudp tx %1 pkts rx %2 pkts | auth-fail %3 replay %4 sim-drop %5 send-err %6")
              .arg(t.packetsSent)
              .arg(t.packetsReceived)
@@ -183,6 +215,7 @@ QString MediaSession::statsText() const
              .arg(t.replays)
              .arg(t.simDropped)
              .arg(t.sendErrors);
+    if (cfg_.linkSim.active()) s += QStringLiteral(" sim-queue-drop %1").arg(t.simQueueDrops);
     return s;
 }
 

@@ -33,6 +33,8 @@ add_library(p2pcore STATIC
     src/net/discovery.h         src/net/discovery.cpp
     src/net/media_transport.h   src/net/media_transport.cpp
     src/net/fec.h                 src/net/fec.cpp
+    src/net/cc/transport_feedback.h    src/net/cc/transport_feedback.cpp
+    src/net/cc/congestion_controller.h src/net/cc/congestion_controller.cpp
     src/audio/jitter_buffer.h   src/audio/jitter_buffer.cpp
     src/audio/drift_resampler.h src/audio/drift_resampler.cpp
     src/audio/opus_codec.h      src/audio/opus_codec.cpp
@@ -47,6 +49,7 @@ add_library(p2pcore STATIC
     src/video/video_packetizer.h  src/video/video_packetizer.cpp
     src/video/video_encoder.h     src/video/video_encoder.cpp
     src/video/video_decoder.h     src/video/video_decoder.cpp
+    src/video/rate_ladder.h       src/video/rate_ladder.cpp
     src/video/video_stream.h      src/video/video_stream.cpp
     src/app/call_controller.h   src/app/call_controller.cpp
 )
@@ -117,7 +120,7 @@ target_compile_options(p2pcall PRIVATE -Wall -Wextra)
 # ---------------------------------------------------------------------------
 if(P2P_BUILD_TESTS)
     enable_testing()
-    foreach(t test_crypto test_negotiation test_jitter_buffer test_drift_resampler test_transport test_fec test_video_packetizer test_call)
+    foreach(t test_crypto test_negotiation test_jitter_buffer test_drift_resampler test_transport test_fec test_video_packetizer test_congestion test_call)
         qt_add_executable(${t} tests/${t}.cpp)
         target_link_libraries(${t} PRIVATE p2pcore Qt6::Test)
         add_test(NAME ${t} COMMAND ${t})
