@@ -1,5 +1,6 @@
 #include "app/call_controller.h"
 
+#include "audio/opus_codec.h"
 #include "net/control_channel.h"
 #include "net/discovery.h"
 
@@ -64,6 +65,8 @@ QString CallController::Selections::summary() const
 CallController::CallController(Options opts, QObject* parent)
     : QObject(parent), opts_(std::move(opts)), instanceId_(randomId())
 {
+    // 0 = use what this binary's libopus supports (tests may set others).
+    if (opts_.caps.audioDredRev == 0) opts_.caps.audioDredRev = audio::dredRevision();
     connect(&server_, &QTcpServer::newConnection, this, &CallController::onNewConnection);
     mediaStatsTimer_.setInterval(500);
     connect(&mediaStatsTimer_, &QTimer::timeout, this, [this] {
@@ -401,6 +404,10 @@ void CallController::startMedia()
         appendLog(QStringLiteral("peer offered no media port; signalling only"));
         return;
     }
+    if (remoteCaps_ && !media_->setPeerDredCompatible(media::dredCompatible(opts_.caps, *remoteCaps_)))
+        appendLog(QStringLiteral("audio: DRED not usable with this peer (our rev %1, theirs %2); using LBRR")
+                      .arg(opts_.caps.audioDredRev)
+                      .arg(remoteCaps_->audioDredRev));
     QString err;
     std::optional<media::StreamSelection> sendCam, recvCam, sendScreen, recvScreen;
     if (sendSel_) {

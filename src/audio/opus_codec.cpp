@@ -1,12 +1,52 @@
 #include "audio/opus_codec.h"
 
 #include <opus.h>
+#if __has_include(<p2p_dred_rev.h>)
+#include <p2p_dred_rev.h> // written by tools/build-opus-dred.sh
+#endif
 
 #include <QLoggingCategory>
+
+#include <cstring>
 
 Q_LOGGING_CATEGORY(lcOpus, "p2p.opus")
 
 namespace p2p::audio {
+
+namespace {
+int builtDredRevision()
+{
+#ifdef P2P_OPUS_DRED_REV
+    return P2P_OPUS_DRED_REV;
+#else
+    // libopus without the header from our build script: known releases.
+    const char* v = opus_get_version_string(); // "libopus 1.6.1"
+    if (std::strncmp(v, "libopus 1.5", 11) == 0) return 10;
+    if (std::strncmp(v, "libopus 1.6", 11) == 0) return 12;
+    return 0;
+#endif
+}
+} // namespace
+
+int dredRevision()
+{
+    static const int rev = [] {
+#ifdef OPUS_SET_DRED_DURATION_REQUEST
+        // The DRED API is always declared; only a --enable-dred build implements it.
+        int err = 0;
+        OpusEncoder* e = opus_encoder_create(48000, 1, OPUS_APPLICATION_VOIP, &err);
+        if (!e) return 0;
+        const bool enc = opus_encoder_ctl(e, OPUS_SET_DRED_DURATION(10)) == OPUS_OK;
+        opus_encoder_destroy(e);
+        OpusDREDDecoder* d = opus_dred_decoder_create(&err);
+        if (d) opus_dred_decoder_destroy(d);
+        return enc && d && err == OPUS_OK ? builtDredRevision() : 0;
+#else
+        return 0;
+#endif
+    }();
+    return rev;
+}
 
 OpusEncoderWrapper::~OpusEncoderWrapper()
 {
@@ -28,19 +68,21 @@ bool OpusEncoderWrapper::init(const Config& cfg)
     opus_encoder_ctl(enc_, OPUS_SET_SIGNAL(OPUS_SIGNAL_VOICE));
     opus_encoder_ctl(enc_, OPUS_SET_VBR(1));
     opus_encoder_ctl(enc_, OPUS_SET_VBR_CONSTRAINT(1));
-    opus_encoder_ctl(enc_, OPUS_SET_INBAND_FEC(cfg.restrictedLowDelay || !cfg.inbandFec ? 0 : 1));
+    // LBRR needs SILK, so restricted-low-delay (CELT only) has none.
+    lbrrEnabled_ = cfg.protection == LossProtection::Lbrr && !cfg.restrictedLowDelay;
+    opus_encoder_ctl(enc_, OPUS_SET_INBAND_FEC(lbrrEnabled_ ? 1 : 0));
     opus_encoder_ctl(enc_, OPUS_SET_PACKET_LOSS_PERC(cfg.expectedLossPct));
     opus_encoder_ctl(enc_, OPUS_SET_LSB_DEPTH(16));
     opus_encoder_ctl(enc_, OPUS_GET_LOOKAHEAD(&lookahead_));
 #ifdef OPUS_SET_DRED_DURATION_REQUEST
-    if (cfg.dredFrames > 0) {
+    if (cfg.protection == LossProtection::Dred && cfg.dredFrames > 0) {
         dredEnabled_ = opus_encoder_ctl(enc_, OPUS_SET_DRED_DURATION(cfg.dredFrames)) == OPUS_OK;
         if (!dredEnabled_) qCInfo(lcOpus) << "DRED not available in this libopus build";
     }
 #endif
-    qCInfo(lcOpus) << "encoder:" << cfg.bitrate / 1000 << "kbps"
+    qCInfo(lcOpus) << "encoder:" << opus_get_version_string() << cfg.bitrate / 1000 << "kbps"
                    << (cfg.restrictedLowDelay ? "restricted-lowdelay" : "voip")
-                   << "lookahead" << lookahead_ << "samples, DRED" << dredEnabled_;
+                   << "lookahead" << lookahead_ << "samples, LBRR" << lbrrEnabled_ << "DRED" << dredEnabled_;
     return true;
 }
 
@@ -72,6 +114,8 @@ bool OpusDecoderWrapper::init(int sampleRate, int channels)
     int err = 0;
     dec_ = opus_decoder_create(sampleRate, channels, &err);
     if (err != OPUS_OK || !dec_) return false;
+    // The default (0) leaves plain-PLC losses on the classic concealment.
+    opus_decoder_ctl(dec_, OPUS_SET_COMPLEXITY(kComplexity));
     dredDec_ = opus_dred_decoder_create(&err);
     if (err == OPUS_OK) dred_ = opus_dred_alloc(&err);
     if (err != OPUS_OK) {

@@ -154,6 +154,7 @@ bool MediaSession::start(const crypto::SessionKeys& keys, const QHostAddress& re
         screenRecv_.reset();
     }
     started_ = true;
+    updateBudgetShares();
     return true;
 }
 
@@ -219,6 +220,10 @@ void MediaSession::updateBudgetShares()
     const bool camera = videoSend_ && videoSend_->running();
     if (videoSend_) videoSend_->setBudgetShare(screen ? 1.0 - kScreenShare : 1.0);
     if (screenSend_) screenSend_->setBudgetShare(camera ? kScreenShare : 1.0);
+    // Audio adapts first, but leaves each sending video stream its minimum.
+    if (audio_)
+        audio_->setReservedBps(int64_t((camera ? cfg_.video.minBitrateKbps : 0) +
+                                       (screen ? cfg_.screen.minBitrateKbps : 0)) * 1000);
 }
 
 void MediaSession::stop()
@@ -237,6 +242,14 @@ void MediaSession::stop()
     videoRecv_.reset();
     audio_.reset();
     started_ = false;
+}
+
+bool MediaSession::setPeerDredCompatible(bool compatible)
+{
+    auto& opus = cfg_.audio.opus;
+    if (compatible || opus.protection != audio::LossProtection::Dred) return true;
+    opus.protection = audio::LossProtection::Lbrr;
+    return false;
 }
 
 void MediaSession::setClockOffsetUs(int64_t us)

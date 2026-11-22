@@ -65,17 +65,21 @@ QString listSummary(const QList<CodecCap>& caps)
 
 QJsonObject MediaCaps::toJson() const
 {
-    return {{"enc", toArray(encoders)}, {"dec", toArray(decoders)}};
+    return {{"enc", toArray(encoders)}, {"dec", toArray(decoders)}, {"dredRev", audioDredRev}};
 }
 
 MediaCaps MediaCaps::fromJson(const QJsonObject& o)
 {
-    return {fromArray(o.value("enc").toArray()), fromArray(o.value("dec").toArray())};
+    // Older peers don't send dredRev: 0, so no DRED with them.
+    return {fromArray(o.value("enc").toArray()), fromArray(o.value("dec").toArray()),
+            std::clamp(o.value("dredRev").toInt(), 0, 255)};
 }
 
 QString MediaCaps::summary() const
 {
-    return QStringLiteral("enc: %1 | dec: %2").arg(listSummary(encoders), listSummary(decoders));
+    return QStringLiteral("enc: %1 | dec: %2 | opus dred %3")
+        .arg(listSummary(encoders), listSummary(decoders),
+             audioDredRev > 0 ? QStringLiteral("rev %1").arg(audioDredRev) : QStringLiteral("none"));
 }
 
 bool MediaCaps::canDecode(Codec c) const

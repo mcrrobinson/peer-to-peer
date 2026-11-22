@@ -23,7 +23,7 @@ Logitech StreamCam `/dev/video0` (60 fps only as MJPEG; NV12 ≤ 30 fps).
 ## Build / run / test
 ```sh
 cmake --preset dev && cmake --build --preset dev && ctest --preset dev   # 9 suites
-tools/build-opus-dred.sh        # optional: libopus 1.5.2 with DRED into build/third_party/opus
+tools/build-opus-dred.sh        # optional: libopus 1.6.1 (+ upstream DRED fixes in tools/patches) with DRED into build/third_party/opus
                                 # (CMake picks it up; clear cache with -U 'OPUS*' -U '__pkg_config_checked_OPUS')
 ./build/dev/p2pcall --instance 1 --video-source camera
 ./build/dev/p2pcall --instance 2 --video-source pattern
@@ -46,8 +46,12 @@ Other flags: `--cc on|off`, `--min-video-bitrate`, `--fec auto|off|<pct>`, `--no
   send / ECN read via `IP_RECVTOS`, transport-wide feedback every ~10 ms, pacer thread, link-sim
   thread), `fec` (GF(256) Cauchy Reed-Solomon erasure code),
   `cc/transport_feedback` (RFC 8888-like reports, overlapping ranges), `cc/congestion_controller`.
-- `src/audio`: miniaudio device I/O, Opus 10 ms VOIP 48 kbps + LBRR (or DRED), adaptive jitter
-  buffer (p95 jitter target, DRED→FEC→PLC concealment), drift resampler, optional APM.
+- `src/audio`: miniaudio device I/O, Opus 10 ms VOIP 48 kbps max with LBRR *or* DRED (never both),
+  bitrate following the CC target (`audio_rate.h`: audio first, leaving the sending video streams
+  their minimum; 12–48 kbps in steps, down at once, up one step per 2 s), decoder complexity 5
+  (neural PLC), adaptive jitter buffer (p95 jitter target, DRED→FEC→PLC concealment), drift
+  resampler, optional APM (AEC reference taken after the drift resampler). DRED only when both
+  peers' caps report the same `dredRev` (libopus DRED bitstream revision: 10 in 1.5, 12 in 1.6).
 - `src/video`: V4L2 camera (MJPEG→NV12 via swscale, BT.601→709), test pattern with a 32-bit frame
   code readable after decode, VA-API/x265/SVT-AV1 encoder (CBR, VBV ≈ 1 frame, P-only, IDR on
   demand), VA-API/dav1d decoder, packetizer + `FrameAssembler`, `rate_ladder` (rungs ×0.7, resolution
@@ -91,8 +95,10 @@ Congestion control (phase 6), in `MediaTransport` because it sees every packet:
       0 lost; 5% bursts with defaults → 0–1 lost.
       **Open:** (a) intra refresh + LTR recovery need a native VA-API HEVC encoder (FFmpeg's
       hevc_vaapi exposes neither) — proposed to defer to phase 9; (b) user to pick the audio
-      default after a listening test: LBRR (default) vs DRED (`--audio-fec dred`; at 48 kbps /
-      10 ms LBRR starves DRED's budget; 64 kbps allows both with ~30 ms DRED); (c) validate NACK/FEC
+      default after a listening test: LBRR (default) vs DRED (`--audio-fec dred`). With both on,
+      libopus gives DRED no bits at 10 ms frames, so each mode now uses only its own. Measured with
+      libopus 1.6.1 (synthetic voiced signal): LBRR 48 kbps → ~44.5 kbps payload, single losses
+      only; DRED 48 kbps → ~51 kbps, bursts ≤ 70 ms; DRED 64 kbps → ~69 kbps, ≥ 100 ms; (c) validate NACK/FEC
       under real delay with `netem.sh on wan` (needs sudo).
 - [x] **6 Congestion control** — design above. Results (pattern 720p30, max 8 Mbps, loopback):
       no limit → stays at max, no pacing, no switches, capture→decoded ~8 ms; `--sim-rate 3000
@@ -147,7 +153,8 @@ Also outstanding: active A/V sync (latencies are reported only); the AV1 softwar
 - `qt6-base-private-dev` is required for `rhi/qrhi.h`; link `Qt6::GuiPrivate` (in 6.8 it comes
   with Gui; 6.9+ needs the component).
 - Mesa VA-API HEVC output is 1088 lines for 1080 input with no crop info — send display size.
-- Debian's libopus lacks DRED; the local static build interposes over the copy libavcodec loads.
+- Debian's and Homebrew's libopus lack DRED; the local static build interposes over the copy libavcodec loads.
+  1.5 and 1.6 DRED don't interoperate (a mismatched decoder silently ignores it): hence `dredRev`.
 - Tests must never open the real camera (they use the pattern source at 1280×720@30).
 - Someone else may edit files concurrently: re-read before editing and keep their changes.
 - FFmpeg hevc_vaapi sends rate-control params only at IDR and libx265 doesn't reconfigure: changing

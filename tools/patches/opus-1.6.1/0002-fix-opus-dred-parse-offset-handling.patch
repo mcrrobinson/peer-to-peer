@@ -1,0 +1,77 @@
+From 5a8a2be8e44ed0651570e5a7d9f06504379a2944 Mon Sep 17 00:00:00 2001
+From: Jean-Marc Valin <jeanmarcv@google.com>
+Date: Mon, 8 Jun 2026 15:45:26 -0400
+Subject: [PATCH] Fix opus_dred_parse() offset handling
+
+Fixes a case where we could end up decoding too few DRED chunks
+---
+ dnn/dred_decoder.c | 9 ++++++++-
+ dnn/dred_decoder.h | 2 +-
+ src/opus_decoder.c | 8 +++-----
+ 3 files changed, 12 insertions(+), 7 deletions(-)
+
+diff --git a/dnn/dred_decoder.c b/dnn/dred_decoder.c
+index 01098af76..f73c333af 100644
+--- a/dnn/dred_decoder.c
++++ b/dnn/dred_decoder.c
+@@ -49,7 +49,7 @@ void dred_decode_latents(ec_dec *dec, float *x, const opus_uint8 *scale, const o
+     }
+ }
+ 
+-int dred_ec_decode(OpusDRED *dec, const opus_uint8 *bytes, int num_bytes, int min_feature_frames, int dred_frame_offset)
++int dred_ec_decode(OpusDRED *dec, const opus_uint8 *bytes, int num_bytes, int max_dred_features, int dred_frame_offset)
+ {
+   ec_dec ec;
+   int q_level;
+@@ -60,6 +60,7 @@ int dred_ec_decode(OpusDRED *dec, const opus_uint8 *bytes, int num_bytes, int mi
+   int qmax;
+   int state_qoffset;
+   int extra_offset;
++  int min_feature_frames;
+ 
+   /* since features are decoded in quadruples, it makes no sense to go with an uneven number of redundancy frames */
+   celt_assert(DRED_NUM_REDUNDANCY_FRAMES % 2 == 0);
+@@ -72,6 +73,12 @@ int dred_ec_decode(OpusDRED *dec, const opus_uint8 *bytes, int num_bytes, int mi
+   else extra_offset = 0;
+   /* Compute total offset, including DRED position in a multiframe packet. */
+   dec->dred_offset = 16 - ec_dec_uint(&ec, 32) - extra_offset + dred_frame_offset;
++
++  /* Dynamically compute the required frames to cover the requested duration + offset.
++     dred_offset is in 2.5ms units, max_dred_features is in 10ms units. */
++  min_feature_frames = (4*max_dred_features + dec->dred_offset + 3)/4;
++  min_feature_frames = IMAX(0, min_feature_frames);
++
+   /*printf("%d %d %d\n", dred_offset, q0, dQ);*/
+   qmax = 15;
+   if (q0 < 14 && dQ > 0) {
+diff --git a/dnn/dred_decoder.h b/dnn/dred_decoder.h
+index 74d1dfcd9..92bf6a351 100644
+--- a/dnn/dred_decoder.h
++++ b/dnn/dred_decoder.h
+@@ -44,6 +44,6 @@ struct OpusDRED {
+ };
+ 
+ 
+-int dred_ec_decode(OpusDRED *dec, const opus_uint8 *bytes, int num_bytes, int min_feature_frames, int dred_frame_offset);
++int dred_ec_decode(OpusDRED *dec, const opus_uint8 *bytes, int num_bytes, int max_dred_features, int dred_frame_offset);
+ 
+ #endif
+diff --git a/src/opus_decoder.c b/src/opus_decoder.c
+index e6207ee6d..ba318f961 100644
+--- a/src/opus_decoder.c
++++ b/src/opus_decoder.c
+@@ -1559,11 +1559,9 @@ int opus_dred_parse(OpusDREDDecoder *dred_dec, OpusDRED *dred, const unsigned ch
+       return payload_len;
+    if (payload != NULL)
+    {
+-      int offset;
+-      int min_feature_frames;
+-      offset = 100*max_dred_samples/sampling_rate;
+-      min_feature_frames = IMIN(2 + offset, 2*DRED_NUM_REDUNDANCY_FRAMES);
+-      dred_ec_decode(dred, payload, payload_len, min_feature_frames, dred_frame_offset);
++      int max_dred_features;
++      max_dred_features = 100*max_dred_samples/sampling_rate;
++      dred_ec_decode(dred, payload, payload_len, max_dred_features, dred_frame_offset);
+       if (!defer_processing)
+          opus_dred_process(dred_dec, dred, dred);
+       if (dred_end) *dred_end = IMAX(0, -dred->dred_offset*sampling_rate/400);

@@ -53,6 +53,10 @@ public:
     bool sharingScreen() const { return screenSend_ && screenSend_->running(); }
     void clearRemoteScreen(); // the peer stopped sharing
 
+    // Before start(): whether the peer parses our DRED. If DRED was chosen
+    // and it doesn't, falls back to LBRR and returns false.
+    bool setPeerDredCompatible(bool compatible);
+
     void setClockOffsetUs(int64_t us);
     void setRttUs(int64_t us);
     void setMuted(bool m);

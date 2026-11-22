@@ -38,6 +38,7 @@ add_library(p2pcore STATIC
     src/audio/jitter_buffer.h   src/audio/jitter_buffer.cpp
     src/audio/drift_resampler.h src/audio/drift_resampler.cpp
     src/audio/opus_codec.h      src/audio/opus_codec.cpp
+    src/audio/audio_rate.h
     src/audio/audio_processor.h src/audio/audio_processor.cpp
     src/audio/audio_io.h        src/audio/audio_io.cpp
     src/audio/audio_pipeline.h  src/audio/audio_pipeline.cpp
@@ -126,7 +127,7 @@ target_compile_options(p2pcall PRIVATE -Wall -Wextra)
 # ---------------------------------------------------------------------------
 if(P2P_BUILD_TESTS)
     enable_testing()
-    foreach(t test_crypto test_negotiation test_jitter_buffer test_drift_resampler test_transport test_fec test_video_packetizer test_congestion test_call)
+    foreach(t test_crypto test_negotiation test_audio_rate test_jitter_buffer test_drift_resampler test_transport test_fec test_video_packetizer test_congestion test_call)
         qt_add_executable(${t} tests/${t}.cpp)
         target_link_libraries(${t} PRIVATE p2pcore Qt6::Test)
         add_test(NAME ${t} COMMAND ${t})

@@ -79,6 +79,24 @@ private slots:
         QCOMPARE(back.decoders, navi10().decoders);
     }
 
+    void dredRevisionRoundTripsAndGates()
+    {
+        MediaCaps a = navi10(), b = navi10();
+        a.audioDredRev = 12;
+        QCOMPARE(MediaCaps::fromJson(a.toJson()).audioDredRev, 12);
+        // A peer from before the field existed: no DRED.
+        QJsonObject old = navi10().toJson();
+        old.remove("dredRev");
+        QCOMPARE(MediaCaps::fromJson(old).audioDredRev, 0);
+
+        b.audioDredRev = 12;
+        QVERIFY(dredCompatible(a, b));
+        b.audioDredRev = 10; // libopus 1.5 vs 1.6
+        QVERIFY(!dredCompatible(a, b));
+        a.audioDredRev = b.audioDredRev = 0; // neither built with DRED
+        QVERIFY(!dredCompatible(a, b));
+    }
+
     void selectionJsonRoundTrip()
     {
         auto s = *negotiate(navi10().encoders, navi10().decoders, {});

@@ -49,7 +49,8 @@ std::unique_ptr<CallController> makePeer(const QString& name, bool autoAccept, M
     o.mediaConfig.video.capture.fps = 30;
     o.mediaConfig.video.bitrateKbps = 4000;
     o.mediaConfig.simulatedBurst = imp.burst;
-    o.mediaConfig.audio.opus.inbandFec = !imp.audioDred;
+    o.mediaConfig.audio.opus.protection =
+        imp.audioDred ? p2p::audio::LossProtection::Dred : p2p::audio::LossProtection::Lbrr;
     o.mediaConfig.video.fec = imp.fec;
     o.mediaConfig.video.fecFixedRate = imp.fecRate;
     o.mediaConfig.video.nack = imp.nack;
@@ -181,6 +182,60 @@ private slots:
               (unsigned long long)s.concealDred, (unsigned long long)s.concealFec, (unsigned long long)s.concealPlc);
         QVERIFY(s.jb.concealed > 10);
         QVERIFY2(s.concealDred * 10 >= s.jb.concealed * 8, "DRED should cover >= 80% of burst losses");
+        a->hangup();
+        QTRY_COMPARE(b->state(), State::Idle);
+    }
+
+    void audioDredFallsBackOnRevisionMismatch()
+    {
+        // Both want DRED, but alice reports a DRED revision bob can't parse:
+        // both must send LBRR instead of DRED the other side would ignore.
+        Impair imp;
+        imp.audioDred = true;
+        MediaCaps odd = navi10Caps();
+        odd.audioDredRev = 99;
+        auto a = makePeer("alice", false, odd, 0.0, imp), b = makePeer("bob", true, navi10Caps(), 0.0, imp);
+        a->callAddress(addrOf(*b));
+        QTRY_COMPARE(b->state(), State::InCall);
+        QTRY_VERIFY_WITH_TIMEOUT(b->mediaSession()->audioStats().jb.decoded > 50, 5000);
+        for (auto* p : {a.get(), b.get()}) {
+            const auto s = p->mediaSession()->audioStats();
+            QVERIFY(!s.dred);
+            QVERIFY(s.lbrr);
+        }
+        a->hangup();
+        QTRY_COMPARE(b->state(), State::Idle);
+    }
+
+    void audioLbrrModeSendsNoDred()
+    {
+        auto a = makePeer("alice", false), b = makePeer("bob", true);
+        a->callAddress(addrOf(*b));
+        QTRY_COMPARE(b->state(), State::InCall);
+        QTRY_VERIFY_WITH_TIMEOUT(b->mediaSession()->audioStats().jb.decoded > 50, 5000);
+        const auto s = a->mediaSession()->audioStats();
+        QVERIFY(s.lbrr);
+        QVERIFY(!s.dred);
+        a->hangup();
+        QTRY_COMPARE(b->state(), State::Idle);
+    }
+
+    void audioBitrateFollowsTightLink()
+    {
+        // A link barely above the controller's floor (video min 300 kbps +
+        // 80 kbps): once video sits at its floor, audio must give way too
+        // rather than push the link into loss.
+        Impair imp;
+        imp.link.rateBps = 400'000;
+        imp.link.delayUs = 5'000;
+        auto a = makePeer("alice", false, navi10Caps(), 0.0, imp), b = makePeer("bob", true);
+        a->callAddress(addrOf(*b));
+        QTRY_COMPARE(b->state(), State::InCall);
+        QTRY_VERIFY_WITH_TIMEOUT(a->mediaSession()->audioStats().bitrateKbps < 48, 15000);
+        const auto s = a->mediaSession()->audioStats();
+        qInfo("tight link: opus %d kbps after %llu changes", s.bitrateKbps, (unsigned long long)s.bitrateChanges);
+        QVERIFY(s.bitrateKbps >= 12);
+        QTRY_VERIFY_WITH_TIMEOUT(b->mediaSession()->audioStats().jb.decoded > 200, 8000);
         a->hangup();
         QTRY_COMPARE(b->state(), State::Idle);
     }
@@ -330,6 +385,19 @@ private slots:
         QCOMPARE(tx.framesSkipped, 0u);
         QCOMPARE(tx.keyframes, 1u);
         QCOMPARE(rx.assembler.nacked, 0u);
+    }
+
+    void audioBitrateStaysAtMaximumOnLan()
+    {
+        auto a = makePeer("alice", false), b = makePeer("bob", true);
+        a->callAddress(addrOf(*b));
+        QTRY_COMPARE(b->state(), State::InCall);
+        QTRY_VERIFY_WITH_TIMEOUT(b->mediaSession()->audioStats().jb.decoded > 200, 8000);
+        const auto s = a->mediaSession()->audioStats();
+        QCOMPARE(s.bitrateKbps, 48);
+        QCOMPARE(s.bitrateChanges, 0u);
+        a->hangup();
+        QTRY_COMPARE(b->state(), State::Idle);
     }
 
     void screenShareStartsStopsAndRestarts()

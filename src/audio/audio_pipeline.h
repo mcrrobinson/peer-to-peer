@@ -2,6 +2,7 @@
 
 #include "audio/audio_io.h"
 #include "audio/audio_processor.h"
+#include "audio/audio_rate.h"
 #include "audio/drift_resampler.h"
 #include "audio/jitter_buffer.h"
 #include "audio/opus_codec.h"
@@ -44,7 +45,10 @@ public:
         bool autoGain = false;        // off by default: made speech sound uneven in testing
         int noiseLevel = 1;           // 0 low, 1 moderate, 2 high
         int periodMs = 10;
-        OpusEncoderWrapper::Config opus;
+        OpusEncoderWrapper::Config opus; // opus.bitrate is the maximum when the bitrate adapts
+        // Follow the congestion controller's target (when it is enabled).
+        bool adaptiveBitrate = true;
+        int minBitrate = 12'000;
     };
 
     struct Stats {
@@ -63,7 +67,9 @@ public:
         double maxCallbackGapMs = 0;
         uint64_t lateCallbacks = 0;  // gap > 1.5x the nominal period
         double driftPpm = 0;          // current playout rate correction
-        bool processingActive = false, dred = false;
+        bool processingActive = false, dred = false, lbrr = false;
+        int bitrateKbps = 0;          // current Opus target
+        uint64_t bitrateChanges = 0;
         bool echoCancel = false, noiseSuppress = false, autoGain = false;
         QString device;
     };
@@ -77,6 +83,9 @@ public:
     void stop();
 
     void setMuted(bool m) { muted_ = m; }
+    // Minimum rate the sending video streams need, which audio leaves them
+    // when the link is tight (adaptive bitrate). Any thread.
+    void setReservedBps(int64_t bps) { reservedBps_ = bps; }
     void setClockOffsetUs(int64_t us) { clockOffsetUs_ = us; }
     // Live AEC / NS / AGC switching (no-op without a real microphone).
     void setProcessing(bool echoCancel, bool noiseSuppress, bool autoGain, int noiseLevel)
@@ -92,6 +101,7 @@ private:
     void process(const int16_t* in, int16_t* out, int frames);
     void decodeOne(int64_t nowUs);
     void encodeAndSend();
+    void adaptBitrate(int64_t nowUs);
     void analyse(const int16_t* pcm, int n);
     double playoutRatio();
 
@@ -110,6 +120,12 @@ private:
     DriftResampler playout_;          // decoded audio, drift-compensated on the way out
     double smoothedBufferedSamples_ = 0;
     int16_t capFrame_[kFrameSamples]{};
+    int16_t renderFrame_[kFrameSamples]{}; // played-out audio, collected for the echo canceller
+    int renderCount_ = 0;
+    std::unique_ptr<AudioRateController> rate_;
+    std::atomic<int64_t> reservedBps_{0};
+    std::atomic<int> bitrate_{0};
+    std::atomic<uint64_t> bitrateChanges_{0};
     int capCount_ = 0;
     int64_t capStartUs_ = 0;
     uint32_t seq_ = 0, ts_ = 0;

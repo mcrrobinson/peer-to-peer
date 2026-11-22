@@ -1,0 +1,30 @@
+From 4f9a2708c41f97e0a093b4b0ffcca01b2d05838b Mon Sep 17 00:00:00 2001
+From: Jean-Marc Valin <jeanmarcv@google.com>
+Date: Thu, 1 Oct 2026 19:18:43 +0000
+Subject: [PATCH] Bound the DRED latent values decoded from the bitstream
+
+ec_laplace_decode_p0() can return values up to about +/-32767 for a
+crafted DRED payload, whereas the encoder only ever produces a small
+range of quantization indices (roughly +/-100). Very large latents are
+pointless for legitimate streams and give an attacker much more control
+over the activations inside the RDOVAE decoder network than intended.
+Clamp the decoded index to +/-1024, which is still far beyond anything
+a real encoder would emit.
+---
+ dnn/dred_decoder.c | 3 +++
+ 1 file changed, 3 insertions(+)
+
+diff --git a/dnn/dred_decoder.c b/dnn/dred_decoder.c
+index f73c333af..c859c3ed2 100644
+--- a/dnn/dred_decoder.c
++++ b/dnn/dred_decoder.c
+@@ -45,6 +45,9 @@ void dred_decode_latents(ec_dec *dec, float *x, const opus_uint8 *scale, const o
+         int q;
+         if (r[i] == 0 || p0[i] == 255) q = 0;
+         else q = ec_laplace_decode_p0(dec, p0[i]<<7, r[i]<<7);
++        /* The encoder never produces values anywhere near this range. Bound
++           what a malicious packet can inject into the decoder network. */
++        q = IMAX(-1024, IMIN(1024, q));
+         x[i] = q*256.f/(scale[i] == 0 ? 1 : scale[i]);
+     }
+ }

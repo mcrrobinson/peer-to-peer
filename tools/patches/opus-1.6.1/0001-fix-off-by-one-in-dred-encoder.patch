@@ -1,0 +1,23 @@
+From f8a36de4195e2fa4492e800a8687a267b91d0fec Mon Sep 17 00:00:00 2001
+From: Jean-Marc Valin <jeanmarcv@google.com>
+Date: Mon, 8 Jun 2026 15:32:42 -0400
+Subject: [PATCH] Fix off-by-one in DRED encoder
+
+We could end up skipping encoding of the last chunk
+---
+ dnn/dred_encoder.c | 2 +-
+ 1 file changed, 1 insertion(+), 1 deletion(-)
+
+diff --git a/dnn/dred_encoder.c b/dnn/dred_encoder.c
+index 31011b330..6ca0276fe 100644
+--- a/dnn/dred_encoder.c
++++ b/dnn/dred_encoder.c
+@@ -343,7 +343,7 @@ int dred_encode_silk_frame(DREDEnc *enc, unsigned char *buf, int max_chunks, int
+       return 0;
+     }
+     ec_bak = ec_encoder;
+-    for (i = 0; i < IMIN(2*max_chunks, enc->latents_buffer_fill-latent_offset-1); i += 2)
++    for (i = 0; i < IMIN(2*max_chunks, enc->latents_buffer_fill-latent_offset); i += 2)
+     {
+         int active;
+         q_level = compute_quantizer(q0, dQ, qmax, i/2);

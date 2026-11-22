@@ -1,0 +1,50 @@
+From a186a194b90a790dbd6ba988068809c378193e67 Mon Sep 17 00:00:00 2001
+From: Jean-Marc Valin <jeanmarcv@google.com>
+Date: Thu, 1 Oct 2026 19:17:53 +0000
+Subject: [PATCH] Reset the OSCE BWE state on decoder reset
+
+The osce_bwe member of silk_decoder_state is located before
+SILK_DECODER_STATE_RESET_START, so silk_reset_decoder() never cleared
+it. Likewise, DecControl.prev_osce_extended_mode lives before
+OPUS_DECODER_RESET_START and survived OPUS_RESET_STATE. If the decoder
+was running in BBWE mode before the reset, the following BBWE frame
+would skip the osce_bwe_reset() call and keep using the pre-reset
+BWE history and feature buffers, which defeats the purpose of the reset.
+
+Reset the BWE state explicitly in silk_reset_decoder() and mark the
+previous extended mode as CELT-only in the OPUS_RESET_STATE handler.
+---
+ silk/init_decoder.c | 4 ++++
+ src/opus_decoder.c  | 4 ++++
+ 2 files changed, 8 insertions(+)
+
+diff --git a/silk/init_decoder.c b/silk/init_decoder.c
+index 64fbd7e38..f353b2ce4 100644
+--- a/silk/init_decoder.c
++++ b/silk/init_decoder.c
+@@ -61,6 +61,10 @@ opus_int silk_reset_decoder(
+ #ifdef ENABLE_OSCE
+     /* Reset OSCE state and method */
+     osce_reset(&psDec->osce, OSCE_DEFAULT_METHOD);
++#ifdef ENABLE_OSCE_BWE
++    /* Reset OSCE BWE state */
++    osce_bwe_reset(&psDec->osce_bwe);
++#endif
+ #endif
+ 
+     return 0;
+diff --git a/src/opus_decoder.c b/src/opus_decoder.c
+index 6f85fd958..7588526d5 100644
+--- a/src/opus_decoder.c
++++ b/src/opus_decoder.c
+@@ -1129,6 +1129,10 @@ int opus_decoder_ctl(OpusDecoder *st, int request, ...)
+       silk_ResetDecoder( silk_dec );
+       st->stream_channels = st->channels;
+       st->frame_size = st->Fs/400;
++#ifdef ENABLE_OSCE_BWE
++      /* DecControl is not part of the cleared area */
++      st->DecControl.prev_osce_extended_mode = OSCE_MODE_CELT_ONLY;
++#endif
+ #ifdef ENABLE_DEEP_PLC
+       lpcnet_plc_reset( &st->lpcnet );
+ #endif

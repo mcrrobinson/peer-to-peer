@@ -61,7 +61,8 @@ int main(int argc, char** argv)
     QCommandLineOption aecOpt("aec", "Echo cancellation: on or off.", "on|off", "off");
     QCommandLineOption nsOpt("ns", "Noise suppression: off, low, moderate, high.", "level", "off");
     QCommandLineOption agcOpt("agc", "Automatic gain control: on or off.", "on|off", "off");
-    QCommandLineOption audioBitrateOpt("audio-bitrate", "Opus bitrate in kbps.", "kbps", "48");
+    QCommandLineOption audioBitrateOpt("audio-bitrate", "Opus bitrate in kbps (the maximum with --cc on).", "kbps",
+                                       "48");
     QCommandLineOption audioLowDelayOpt("audio-lowdelay", "Opus restricted-low-delay (CELT only, no LBRR).");
     QCommandLineOption periodOpt("audio-period", "Audio device period in ms.", "ms", "10");
     QCommandLineOption simLossOpt("sim-loss", "Drop this percentage of outgoing media packets (testing).", "pct", "0");
@@ -76,8 +77,10 @@ int main(int argc, char** argv)
     QCommandLineOption videoBitrateOpt("video-bitrate", "Video bitrate in kbps (the maximum with --cc on).", "kbps",
                                        "12000");
     QCommandLineOption cameraFormatOpt("camera-format", "Camera format: auto, mjpeg or nv12.", "fmt", "auto");
-    QCommandLineOption audioFecOpt("audio-fec", "Opus loss protection: lbrr (in-band FEC) or dred.", "mode",
-                                   "lbrr");
+    QCommandLineOption audioFecOpt("audio-fec",
+                                   "Opus loss protection: lbrr (in-band FEC, recovers single losses) or dred "
+                                   "(deep redundancy, recovers bursts; needs a DRED build on both peers).",
+                                   "mode", "lbrr");
     QCommandLineOption fecOpt("fec", "Video FEC: auto, off, or a fixed parity percentage.", "mode", "auto");
     QCommandLineOption noNackOpt("no-nack", "Disable video retransmission requests.");
     QCommandLineOption simBurstOpt("sim-burst", "Mean length of simulated loss bursts, in packets (testing).", "n",
@@ -139,7 +142,13 @@ int main(int argc, char** argv)
     audio.noiseLevel = ns == "low" ? 0 : ns == "high" ? 2 : 1;
     audio.opus.bitrate = std::clamp(cli.value(audioBitrateOpt).toInt(), 6, 510) * 1000;
     audio.opus.restrictedLowDelay = cli.isSet(audioLowDelayOpt);
-    audio.opus.inbandFec = cli.value(audioFecOpt) != "dred";
+    const QString audioFec = cli.value(audioFecOpt);
+    if (audioFec == "lbrr") audio.opus.protection = p2p::audio::LossProtection::Lbrr;
+    else if (audioFec == "dred") audio.opus.protection = p2p::audio::LossProtection::Dred;
+    else {
+        std::fprintf(stderr, "--audio-fec must be lbrr or dred\n");
+        return 1;
+    }
     audio.periodMs = std::clamp(cli.value(periodOpt).toInt(), 2, 40);
     opts.mediaConfig.simulatedLoss = std::clamp(cli.value(simLossOpt).toDouble(), 0.0, 100.0) / 100.0;
     opts.media = !cli.isSet(noMediaOpt);

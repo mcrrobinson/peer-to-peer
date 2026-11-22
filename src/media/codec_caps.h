@@ -28,12 +28,21 @@ struct CodecCap {
 struct MediaCaps {
     QList<CodecCap> encoders;
     QList<CodecCap> decoders;
+    // Opus DRED bitstream revision this peer sends and parses (0 = none).
+    // DRED is only used when both peers report the same non-zero value.
+    int audioDredRev = 0;
 
     QJsonObject toJson() const;
     static MediaCaps fromJson(const QJsonObject& o);
     QString summary() const;
     bool canDecode(Codec c) const;
 };
+
+// Whether two peers can exchange DRED.
+inline bool dredCompatible(const MediaCaps& a, const MediaCaps& b)
+{
+    return a.audioDredRev > 0 && a.audioDredRev == b.audioDredRev;
+}
 
 struct NegotiationPolicy {
     // When set, any AV1 pairing (even software) beats any HEVC pairing.

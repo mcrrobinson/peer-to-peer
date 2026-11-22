@@ -17,6 +17,8 @@ namespace p2p::audio {
 namespace {
 constexpr size_t kAudioHeader = 16;
 constexpr size_t kLatencyWindow = 300;
+constexpr size_t kIpUdpOverhead = 28;  // IPv4 + UDP, as the congestion controller counts it
+constexpr int kRateCheckFrames = 10;   // adapt the bitrate every 100 ms
 
 void putU32(uint8_t* p, uint32_t v) { p[0] = uint8_t(v >> 24); p[1] = uint8_t(v >> 16); p[2] = uint8_t(v >> 8); p[3] = uint8_t(v); }
 uint32_t getU32(const uint8_t* p) { return uint32_t(p[0]) << 24 | uint32_t(p[1]) << 16 | uint32_t(p[2]) << 8 | p[3]; }
@@ -46,6 +48,15 @@ bool AudioPipeline::start(QString* error)
     if (!enc_.init(cfg_.opus) || !dec_.init(kSampleRate, 1)) {
         if (error) *error = QStringLiteral("opus init failed");
         return false;
+    }
+    bitrate_ = cfg_.opus.bitrate;
+    if (cfg_.adaptiveBitrate) {
+        AudioRateController::Config rc;
+        rc.maxBps = cfg_.opus.bitrate;
+        rc.minBps = cfg_.minBitrate;
+        rc.overheadBps = int64_t(kAudioHeader + net::wire::kHeaderSize + net::wire::kTagSize + kIpUdpOverhead) * 8 *
+                         (kSampleRate / kFrameSamples);
+        rate_ = std::make_unique<AudioRateController>(rc);
     }
 
     io_ = cfg_.useDevice ? createDeviceAudioIO(cfg_.periodMs) : std::make_unique<SimulatedAudioIO>(cfg_.periodMs);
@@ -105,6 +116,20 @@ void AudioPipeline::process(const int16_t* in, int16_t* out, int frames)
     const double ratio = playoutRatio();
     while (playout_.size() < playout_.required(frames, ratio)) decodeOne(now);
     playout_.pull(out, frames, ratio);
+
+    // Echo-canceller reference: exactly what goes to the speaker, after the
+    // drift resampler has stretched it, in 10 ms frames.
+    if (apm_.active()) {
+        for (int i = 0; i < frames; ++i) {
+            renderFrame_[renderCount_++] = out[i];
+            if (renderCount_ == kFrameSamples) {
+                apm_.processRender(renderFrame_);
+                renderCount_ = 0;
+            }
+        }
+    } else {
+        renderCount_ = 0;
+    }
 
     for (int i = 0; i < frames; ++i) {
         int16_t s = 0;
@@ -169,8 +194,6 @@ void AudioPipeline::decodeOne(int64_t nowUs)
         n = kFrameSamples;
     }
 
-    if (apm_.active())
-        for (int off = 0; off + kFrameSamples <= n; off += kFrameSamples) apm_.processRender(pcm + off);
     if (r.action != JitterBuffer::Action::Silence) analyse(pcm, n);
 
     playout_.push(pcm, n);
@@ -205,6 +228,7 @@ void AudioPipeline::encodeAndSend()
     putU32(pkt, seq_);
     putU32(pkt + 4, ts_);
     putU64(pkt + 8, uint64_t(capStartUs_));
+    if (rate_ && seq_ % kRateCheckFrames == 0) adaptBitrate(capStartUs_);
     const int n = enc_.encode(capFrame_, kFrameSamples, pkt + kAudioHeader, int(sizeof(pkt) - kAudioHeader));
     ++seq_;
     ts_ += kFrameSamples;
@@ -213,6 +237,18 @@ void AudioPipeline::encodeAndSend()
         framesSent_.fetch_add(1, std::memory_order_relaxed);
         bytesSent_.fetch_add(kAudioHeader + size_t(n), std::memory_order_relaxed);
     }
+}
+
+void AudioPipeline::adaptBitrate(int64_t nowUs)
+{
+    if (!transport_.congestionControlEnabled()) return;
+    if (!rate_->update(transport_.targetBps(), reservedBps_.load(std::memory_order_relaxed), nowUs)) return;
+    const int bps = rate_->bitrate();
+    enc_.setBitrate(bps);
+    bitrate_.store(bps, std::memory_order_relaxed);
+    bitrateChanges_.fetch_add(1, std::memory_order_relaxed);
+    qCInfo(lcAudio) << "opus bitrate ->" << bps / 1000 << "kbps (cc target" << transport_.targetBps() / 1000
+                    << "kbps)";
 }
 
 void AudioPipeline::analyse(const int16_t* pcm, int n)
@@ -285,6 +321,9 @@ AudioPipeline::Stats AudioPipeline::stats() const
     s.noiseSuppress = apm_.noiseSuppress();
     s.autoGain = apm_.autoGain();
     s.dred = enc_.dredEnabled();
+    s.lbrr = enc_.lbrrEnabled();
+    s.bitrateKbps = bitrate_.load() / 1000;
+    s.bitrateChanges = bitrateChanges_.load();
     if (io_) {
         s.deviceLatencyMs = io_->deviceLatencyMs();
         s.device = io_->description();
@@ -296,7 +335,7 @@ QString AudioPipeline::format(const Stats& s)
 {
     return QStringLiteral("audio tx %1 frames | rx %2 dec %3 conceal %4 (dred %5 fec %6 plc %7) underrun %8 late %9 drop %10\n"
                           "jb target %11 ms level %12 ms jitter p95 %13 ms | latency avg %14 ms p95 %15 ms (+%16 ms device)\n"
-                          "out %17 dBFS tone %18% | %19 | DRED %20\n"
+                          "out %17 dBFS tone %18% | %19 | opus %28 kbps (changes %29) fec %20\n"
                           "device cb %21 frames %22-%23 max gap %24 ms late %25 | late-after-wait %26 | drift-comp %27 ppm")
         .arg(s.framesSent)
         .arg(s.jb.received)
@@ -318,14 +357,16 @@ QString AudioPipeline::format(const Stats& s)
         .arg(s.toneFraction * 100.0, 0, 'f', 0)
         .arg(QStringLiteral("AEC %1 NS %2 AGC %3")
                  .arg(s.echoCancel ? "on" : "off", s.noiseSuppress ? "on" : "off", s.autoGain ? "on" : "off"))
-        .arg(s.dred ? "on" : "off")
+        .arg(s.dred ? "dred" : s.lbrr ? "lbrr" : "off")
         .arg(s.callbacks)
         .arg(s.minCallbackFrames)
         .arg(s.maxCallbackFrames)
         .arg(s.maxCallbackGapMs, 0, 'f', 1)
         .arg(s.lateCallbacks)
         .arg(s.jb.lateAfterWait)
-        .arg(qRound(s.driftPpm));
+        .arg(qRound(s.driftPpm))
+        .arg(s.bitrateKbps)
+        .arg(s.bitrateChanges);
 }
 
 } // namespace p2p::audio
