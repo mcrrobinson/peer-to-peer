@@ -14,7 +14,7 @@ constexpr double kScreenShare = 0.65; // of the video budget while camera and sc
 
 QString formatSend(const char* label, const video::VideoSendStream::Stats& v)
 {
-    return QStringLiteral("\n%25 tx %1 %2x%3 %4 fps %5 kbps | enc %6 avg %7 ms max %8 ms | key %9 pli-rx %10\n"
+    return QStringLiteral("\n%25 tx %1 %2x%3 %4 fps %5 kbps | enc %6 avg %7 ms max %8 ms | key %9 pli-rx %10 recover-rx %26 recoveries %27\n"
                           "     src %11\n     loss est %12% | fec %13% (%14 parity) | nack items %15 resent %16 miss %17\n"
                           "     ladder rung %18/%19 %20 kbps (budget %21) switches %22 reopen max %23 ms | skipped %24")
         .arg(v.encoder)
@@ -41,7 +41,9 @@ QString formatSend(const char* label, const video::VideoSendStream::Stats& v)
         .arg(v.rungSwitches)
         .arg(v.reopenMaxMs, 0, 'f', 1)
         .arg(v.framesSkipped)
-        .arg(QLatin1String(label)) +
+        .arg(QLatin1String(label))
+        .arg(v.recoverReceived)
+        .arg(v.recoveries) +
            (v.stages.isEmpty() ? QString() : QStringLiteral("\n     stages ms avg/p95: %1").arg(v.stages));
 }
 
@@ -63,7 +65,7 @@ QString formatDisplay(const video::FrameHub::DisplayStats& d)
 QString formatRecv(const char* label, const video::VideoReceiveStream::Stats& v)
 {
     return QStringLiteral("\n%22 rx %1 %2x%3 %4 fps %5 kbps | dec %6 avg %7 ms err %8 | lost %9 skipped %10 "
-                          "pli-tx %11\n     latency capture->decoded avg %12 ms p95 %13 ms | pattern ok %14 bad %15\n"
+                          "pli-tx %11 recover-tx %23\n     latency capture->decoded avg %12 ms p95 %13 ms | pattern ok %14 bad %15\n"
                           "     path loss %16% | recovered frames %17 (fec %18 frags, resend %19/%20 useful) nack %21")
         .arg(v.decoder)
         .arg(v.width)
@@ -86,7 +88,8 @@ QString formatRecv(const char* label, const video::VideoReceiveStream::Stats& v)
         .arg(v.assembler.retransmitsUseful)
         .arg(v.assembler.retransmitsReceived)
         .arg(v.assembler.nacked)
-        .arg(QLatin1String(label)) +
+        .arg(QLatin1String(label))
+        .arg(v.recoverSent) +
            (v.stages.isEmpty() ? QString() : QStringLiteral("\n     stages ms avg/p95: %1").arg(v.stages)) +
            formatDisplay(v.display);
 }

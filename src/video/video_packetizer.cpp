@@ -39,6 +39,7 @@ void FragmentHeader::write(uint8_t* p) const
     p[22] = fecParity;
     p[23] = fecBlock;
     putU16(p + 24, encodeDelay10Us);
+    p[26] = refBack;
 }
 
 std::optional<FragmentHeader> FragmentHeader::read(const uint8_t* p, size_t len)
@@ -56,6 +57,7 @@ std::optional<FragmentHeader> FragmentHeader::read(const uint8_t* p, size_t len)
     h.fecParity = p[22];
     h.fecBlock = p[23];
     h.encodeDelay10Us = getU16(p + 24);
+    h.refBack = p[26];
     if (h.count == 0) return std::nullopt;
     if (h.fecParity == 0) {
         if (h.index >= h.count) return std::nullopt;
@@ -87,6 +89,7 @@ size_t packetizeFrame(uint32_t frameId, int64_t captureUs, bool keyframe, uint8_
     h.flags = uint8_t((keyframe ? FragmentHeader::kKeyframe : 0) |
                       (opt.extraFlags & ~(FragmentHeader::kKeyframe | FragmentHeader::kRetransmit)));
     h.codec = codec;
+    h.refBack = keyframe ? 0 : opt.refBack;
     if (opt.encodedUs > 0)
         h.encodeDelay10Us = uint16_t(std::clamp<int64_t>((opt.encodedUs - captureUs) / 10, 0, 0xffff));
     h.width = opt.width;
@@ -269,6 +272,7 @@ void FrameAssembler::complete(uint32_t id, Partial&& p, int64_t nowUs)
     f.firstArrivalUs = p.firstArrivalUs;
     f.completeUs = nowUs;
     f.recovered = p.recovered;
+    f.refBack = f.keyframe ? 0 : p.first.refBack;
     size_t total = 0;
     for (const auto& c : p.chunks) total += c.size();
     if (total > cfg_.maxFrameBytes) {
@@ -297,13 +301,32 @@ void FrameAssembler::dropBefore(uint32_t id)
     }
 }
 
+bool FrameAssembler::released(uint32_t id) const
+{
+    return std::find(released_.begin(), released_.end(), id) != released_.end();
+}
+
+bool FrameAssembler::startsDecodable(uint32_t id, bool keyframe, uint8_t refBack) const
+{
+    return keyframe || (refBack && released(id - refBack));
+}
+
+std::optional<uint32_t> FrameAssembler::lastReleased() const
+{
+    if (released_.empty()) return std::nullopt;
+    return released_.back();
+}
+
 std::vector<AssembledFrame> FrameAssembler::poll(int64_t nowUs)
 {
     std::vector<AssembledFrame> out;
+    auto decodable = [&](const auto& kv) { return startsDecodable(kv.first, kv.second.keyframe, kv.second.refBack); };
     for (;;) {
         if (!haveNext_) {
-            // Resynchronise on the oldest complete keyframe.
-            auto key = std::find_if(ready_.begin(), ready_.end(), [](const auto& kv) { return kv.second.keyframe; });
+            // Resynchronise on the oldest complete frame we can decode: a
+            // keyframe, or one that predicts from a frame we released (the
+            // sender's answer to a recovery request).
+            auto key = std::find_if(ready_.begin(), ready_.end(), decodable);
             if (key == ready_.end()) break;
             nextId_ = key->first;
             dropBefore(nextId_);
@@ -312,6 +335,8 @@ std::vector<AssembledFrame> FrameAssembler::poll(int64_t nowUs)
         }
 
         if (auto it = ready_.find(nextId_); it != ready_.end()) {
+            released_.push_back(nextId_);
+            if (released_.size() > kReleasedHistory) released_.pop_front();
             out.push_back(std::move(it->second));
             ready_.erase(it);
             ++nextId_;
@@ -320,9 +345,10 @@ std::vector<AssembledFrame> FrameAssembler::poll(int64_t nowUs)
             continue;
         }
 
-        // nextId_ is missing. A complete keyframe further on lets us jump.
+        // nextId_ is missing. A complete frame further on that doesn't
+        // need it (a keyframe or a recovery frame) lets us jump.
         auto key = std::find_if(ready_.begin(), ready_.end(), [&](const auto& kv) {
-            return kv.second.keyframe && int32_t(kv.first - nextId_) > 0;
+            return int32_t(kv.first - nextId_) > 0 && decodable(kv);
         });
         if (key != ready_.end()) {
             st_.framesLost += key->first - nextId_;
@@ -369,8 +395,8 @@ std::vector<NackItem> FrameAssembler::collectNacks(int64_t nowUs, const NackPoli
         // not just the fixed reorder time.
         if (nowUs - p.lastArrivalUs < std::max(policy.reorderUs, 3 * fragmentGapUs_)) continue;
         const FragmentHeader& h = p.first;
-        // While waiting to resync only a keyframe helps.
-        if (!haveNext_ && !(h.flags & FragmentHeader::kKeyframe)) continue;
+        // While waiting to resync only a frame we could start from helps.
+        if (!haveNext_ && !startsDecodable(id, h.flags & FragmentHeader::kKeyframe, h.refBack)) continue;
         const int blocks = h.fecParity ? h.blocks() : 1;
         for (int b = 0; b < blocks; ++b) {
             const auto [lo, hi] = h.fecParity ? blockRange(h, b) : std::pair<int, int>{0, int(h.count)};

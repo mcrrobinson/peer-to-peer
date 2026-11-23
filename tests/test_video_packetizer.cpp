@@ -21,10 +21,11 @@ std::vector<uint8_t> payload(size_t n, uint8_t seed)
 }
 
 std::vector<Frag> split(uint32_t id, const std::vector<uint8_t>& data, bool key, size_t mtu = 1400,
-                        double fecRate = 0, int fecBlock = 32)
+                        double fecRate = 0, int fecBlock = 32, uint8_t refBack = 1)
 {
     std::vector<Frag> out;
     PacketizeOptions opt;
+    opt.refBack = refBack;
     opt.fecRate = fecRate;
     opt.fecBlockSize = fecBlock;
     packetizeFrame(
@@ -59,6 +60,7 @@ private slots:
     {
         FragmentHeader h{0xdeadbeef, 3, 9, 123456789012, FragmentHeader::kKeyframe, 2, 1920, 1080};
         h.encodeDelay10Us = 4321;
+        h.refBack = 7;
         uint8_t b[FragmentHeader::kSize];
         h.write(b);
         auto r = FragmentHeader::read(b, sizeof(b));
@@ -72,6 +74,7 @@ private slots:
         QCOMPARE(r->width, h.width);
         QCOMPARE(r->height, h.height);
         QCOMPARE(r->encodeDelay10Us, h.encodeDelay10Us);
+        QCOMPARE(r->refBack, h.refBack);
         b[5] = 9; // index == count
         QVERIFY(!FragmentHeader::read(b, sizeof(b)));
         QVERIFY(!FragmentHeader::read(b, 5));
@@ -186,6 +189,47 @@ private slots:
         feed(a, split(1, payload(100, 1), true));
         a.poll(0);
         feed(a, split(5, payload(100, 5), true)); // 2..4 never arrive
+        auto out = a.poll(0);
+        QCOMPARE(out.size(), size_t(1));
+        QCOMPARE(out[0].id, 5u);
+        QCOMPARE(a.stats().framesLost, 3u);
+    }
+
+    // After a loss the sender predicts from the last frame we released:
+    // decoding resumes there, without a keyframe.
+    void resumesFromRecoveryFrame()
+    {
+        FrameAssembler a;
+        feed(a, split(1, payload(3000, 1), true, 1400, 0, 32, 0));
+        feed(a, split(2, payload(3000, 2), false));
+        QCOMPARE(a.poll(0).size(), size_t(2));
+        QCOMPARE(*a.lastReleased(), 2u);
+        // 3 never arrives; 4 predicts from it (undecodable).
+        feed(a, split(4, payload(3000, 4), false), 1000);
+        QVERIFY(a.poll(1000).empty());
+        QVERIFY(a.poll(25'000).empty());
+        QVERIFY(a.needKeyframe());
+        QCOMPARE(*a.lastReleased(), 2u); // what the receiver asks to recover from
+        // A late copy of 4 still doesn't help; frame 5 from 2 (3 back) does.
+        feed(a, split(5, payload(3000, 5), false, 1400, 0, 32, 3), 30'000);
+        feed(a, split(6, payload(3000, 6), false), 30'000);
+        auto out = a.poll(30'000);
+        QCOMPARE(out.size(), size_t(2));
+        QCOMPARE(out[0].id, 5u);
+        QCOMPARE(out[1].id, 6u);
+        QVERIFY(!a.needKeyframe());
+    }
+
+    // A recovery frame that is already complete ends a gap at once, like a
+    // keyframe; one predicting from a frame we never had doesn't.
+    void recoveryFrameSkipsGapImmediately()
+    {
+        FrameAssembler a;
+        feed(a, split(1, payload(100, 1), true, 1400, 0, 32, 0));
+        a.poll(0);
+        feed(a, split(4, payload(100, 4), false, 1400, 0, 32, 2)); // from 2: never had it
+        QVERIFY(a.poll(0).empty());
+        feed(a, split(5, payload(100, 5), false, 1400, 0, 32, 4)); // from 1
         auto out = a.poll(0);
         QCOMPARE(out.size(), size_t(1));
         QCOMPARE(out[0].id, 5u);

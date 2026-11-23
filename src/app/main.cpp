@@ -7,6 +7,7 @@
 #include <QStandardPaths>
 #include <QCoreApplication>
 #include "video/video_decoder.h"
+#include "video/video_encoder.h"
 
 #include <QGuiApplication>
 #include <QHostInfo>
@@ -79,6 +80,7 @@ int main(int argc, char** argv)
                                        "12000");
     QCommandLineOption cameraFormatOpt("camera-format", "Camera format: auto, mjpeg or nv12.", "fmt", "auto");
     QCommandLineOption decodeOutputOpt("decode-output", "Hardware-decoded video: gpu (shown without a copy) or cpu (read back first).", "where", "gpu");
+    QCommandLineOption encoderOpt("encoder", "Hardware HEVC encoder: native (own VA-API encoder) or ffmpeg (FFmpeg's hevc_vaapi).", "which", "native");
     QCommandLineOption cameraDecodeOpt("camera-decode", "Camera MJPEG decode: auto (hardware if available) or software.", "how", "auto");
     QCommandLineOption audioFecOpt("audio-fec", "Opus loss protection: lbrr (in-band FEC) or dred.", "mode",
                                    "lbrr");
@@ -106,7 +108,7 @@ int main(int argc, char** argv)
                                        "portal");
     QCommandLineOption screenBitrateOpt("screen-bitrate", "Screen share bitrate in kbps (the maximum with --cc on).",
                                         "kbps", "10000");
-    cli.addOptions({videoSourceOpt, cameraOpt, videoSizeOpt, videoFpsOpt, videoBitrateOpt, cameraFormatOpt, cameraDecodeOpt, decodeOutputOpt, fecOpt,
+    cli.addOptions({videoSourceOpt, cameraOpt, videoSizeOpt, videoFpsOpt, videoBitrateOpt, cameraFormatOpt, cameraDecodeOpt, decodeOutputOpt, encoderOpt, fecOpt,
                     noNackOpt, simBurstOpt, audioFecOpt, ccOpt, minBitrateOpt, simRateOpt, simDelayOpt, simQueueOpt,
                     simCeOpt, flashLogOpt, shareScreenOpt, screenSourceOpt, screenBitrateOpt});
     cli.process(*app);
@@ -176,6 +178,7 @@ int main(int argc, char** argv)
                                            : p2p::video::CaptureConfig::Format::Auto;
     video.capture.hwJpegDecode = cli.value(cameraDecodeOpt) != "software";
     p2p::video::VideoDecoder::setGpuFrames(cli.value(decodeOutputOpt) != "cpu");
+    p2p::video::VideoEncoder::setNativeHevc(cli.value(encoderOpt) == "native");
     video.bitrateKbps = std::clamp(cli.value(videoBitrateOpt).toInt(), 100, 200000);
     const QString fec = cli.value(fecOpt);
     if (fec == "auto") video.fec = p2p::video::VideoStreamConfig::Fec::Auto;

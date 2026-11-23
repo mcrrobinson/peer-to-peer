@@ -1,6 +1,7 @@
 #pragma once
 
 #include <cstdint>
+#include <deque>
 #include <functional>
 #include <map>
 #include <optional>
@@ -15,10 +16,17 @@ namespace p2p::video {
 //   u32 frame id | u16 fragment index | u16 data fragment count |
 //   u64 capture time (sender us) | u8 flags | u8 codec |
 //   u16 display width | u16 display height |
-//   u8 FEC parity per block | u8 FEC block size
+//   u8 FEC parity per block | u8 FEC block size | u16 encode delay |
+//   u8 reference: frames back to the one this frame predicts from
+//      (0 = none / keyframe; 1 = the previous frame)
 //
-// The display size is carried because some encoders (Mesa VA-API HEVC)
-// pad the coded size, e.g. 1080 -> 1088, without a conformance window.
+// The reference lets the receiver resume after a loss without a keyframe:
+// asked to recover from the last frame it decoded, the native HEVC encoder
+// predicts its next frame from that one (or an older one in its chain).
+//
+// The display size is carried because some encoders (FFmpeg's hevc_vaapi
+// on Mesa) pad the coded size, e.g. 1080 -> 1088, without a conformance
+// window.
 //
 // FEC: data fragments are grouped into blocks of |fecBlock| consecutive
 // fragments; each block gets |fecParity| Reed-Solomon parity fragments,
@@ -28,7 +36,7 @@ namespace p2p::video {
 //
 // The whole frame is sent as one burst (no pacing on a LAN).
 struct FragmentHeader {
-    static constexpr size_t kSize = 26;
+    static constexpr size_t kSize = 27;
     // kTestPattern: the sender's source is the synthetic pattern, so the
     // receiver can verify the frame number embedded in the pixels.
     // kRetransmit: a resend in answer to a NACK.
@@ -46,6 +54,7 @@ struct FragmentHeader {
     // Capture -> encoder output on the sender, in 10 us units (latency
     // breakdown); saturates at 0xffff.
     uint16_t encodeDelay10Us = 0;
+    uint8_t refBack = 0;
 
     bool isParity() const { return index >= count; }
     int blocks() const { return fecParity ? (count + fecBlock - 1) / fecBlock : 0; }
@@ -61,6 +70,7 @@ struct PacketizeOptions {
     double fecRate = 0.0;
     int fecBlockSize = 32;
     int64_t encodedUs = 0; // when the encoder produced the frame (0 = unknown), sender clock
+    uint8_t refBack = 1;   // frames back to the reference (ignored for keyframes)
 };
 
 // Calls |sendFragment| once per fragment with a complete payload (header + data):
@@ -82,6 +92,7 @@ struct AssembledFrame {
     int64_t firstArrivalUs = 0;
     int64_t completeUs = 0;
     bool recovered = false; // needed FEC or retransmission
+    uint8_t refBack = 0;    // FragmentHeader::refBack
     std::vector<uint8_t> data;
 };
 
@@ -97,8 +108,10 @@ struct NackItem {
 // order. Video is rendered as soon as it is decodable, so there is no
 // playout delay. Missing fragments are first rebuilt from FEC, then
 // requested again (collectNacks); only once the grace period runs out is
-// a frame declared lost, needKeyframe() turns true, and the caller sends a
-// picture-loss indication.
+// a frame declared lost and needKeyframe() turns true: the caller asks the
+// sender to recover from lastReleased() (or for a keyframe). Decoding
+// resumes at the next frame that predicts from a released frame, or a
+// keyframe; such a frame also ends a gap early.
 //
 // Not thread-safe; the owner serialises calls.
 class FrameAssembler {
@@ -134,6 +147,8 @@ public:
     std::vector<NackItem> collectNacks(int64_t nowUs, const NackPolicy& policy);
 
     bool needKeyframe() const { return !haveNext_; }
+    // Newest frame handed out for decoding (what the decoder last has).
+    std::optional<uint32_t> lastReleased() const;
     const Stats& stats() const { return st_; }
 
 private:
@@ -159,12 +174,16 @@ private:
     void tryRecover(Partial& p, int block);
     void complete(uint32_t id, Partial&& p, int64_t nowUs);
     void dropBefore(uint32_t id);
+    bool released(uint32_t id) const;
+    bool startsDecodable(uint32_t id, bool keyframe, uint8_t refBack) const;
     bool known(uint32_t id) const { return partial_.count(id) || ready_.count(id); }
 
     Config cfg_;
     std::map<uint32_t, Partial> partial_;
     std::map<uint32_t, AssembledFrame> ready_;
     std::map<uint32_t, MissingFrame> missing_; // frames with no fragment at all, inside the gap
+    static constexpr size_t kReleasedHistory = 256;
+    std::deque<uint32_t> released_; // recently released frame ids, oldest first
     bool haveNext_ = false;       // false: waiting for a keyframe
     bool haveFloor_ = false;      // nextId_ is a floor while resyncing: older frames are history
     uint32_t nextId_ = 0;

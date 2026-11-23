@@ -7,10 +7,13 @@ namespace p2p::video {
 
 // Encoder operating points for congestion control. FFmpeg's hevc_vaapi and
 // libx265 only apply rate-control settings when the encoder is opened, so
-// every bitrate change re-opens the encoder and costs a keyframe; the ladder
-// therefore has discrete rungs (each ~0.7x the one above) and the selector
-// switches with hysteresis. Resolution steps down when the bits per pixel
-// would get too thin.
+// with them every bitrate change re-opens the encoder and costs a keyframe;
+// the ladder therefore has discrete rungs (each ~0.7x the one above) and the
+// selector switches with hysteresis. The native HEVC encoder retargets live,
+// so with it only a size change re-opens the encoder. (It still runs at the
+// rung's rate: following the budget between rungs was measured to cost
+// latency on a tight link -- the gap is the headroom.) Resolution steps
+// down when the bits per pixel would get too thin.
 struct Rung {
     int kbps = 0;
     int width = 0, height = 0;

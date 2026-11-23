@@ -48,6 +48,7 @@ add_library(p2pcore STATIC
     src/video/video_source.h      src/video/test_pattern.cpp
     src/video/video_packetizer.h  src/video/video_packetizer.cpp
     src/video/video_encoder.h     src/video/video_encoder.cpp
+    src/video/hevc_headers.h      src/video/hevc_headers.cpp
     src/video/video_decoder.h     src/video/video_decoder.cpp
     src/video/rate_ladder.h       src/video/rate_ladder.cpp
     src/video/latency_stages.cpp
@@ -90,6 +91,7 @@ if(CMAKE_SYSTEM_NAME STREQUAL "Linux")
     pkg_check_modules(LIBVA REQUIRED IMPORTED_TARGET libva libva-drm)
     pkg_check_modules(PIPEWIRE REQUIRED IMPORTED_TARGET libpipewire-0.3)
     target_sources(p2pcore PRIVATE src/video/codec_probe_linux.cpp src/video/camera_v4l2.cpp src/video/jpeg_decode.cpp src/video/vaapi_device.cpp
+                                   src/video/hevc_vaapi_encoder.cpp
                                    src/video/screen_capture_pipewire.cpp)
     target_link_libraries(p2pcore PRIVATE PkgConfig::LIBVA PkgConfig::PIPEWIRE Qt6::DBus)
     # SPA's C headers use designated initialisers and casts g++ warns about.
@@ -144,5 +146,8 @@ if(P2P_BUILD_TESTS)
         qt_add_executable(test_jpeg_decode tests/test_jpeg_decode.cpp)
         target_link_libraries(test_jpeg_decode PRIVATE p2pcore Qt6::Test PkgConfig::FFMPEG)
         add_test(NAME test_jpeg_decode COMMAND test_jpeg_decode)
+        qt_add_executable(test_hevc_encoder tests/test_hevc_encoder.cpp)
+        target_link_libraries(test_hevc_encoder PRIVATE p2pcore Qt6::Test)
+        add_test(NAME test_hevc_encoder COMMAND test_hevc_encoder)
     endif()
 endif()

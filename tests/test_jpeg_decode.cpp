@@ -114,16 +114,21 @@ private slots:
     {
         QTest::addColumn<int>("w");
         QTest::addColumn<int>("h");
-        QTest::newRow("unscaled") << 1280 << 720;
-        QTest::newRow("scaled") << 640 << 360;
+        QTest::addColumn<bool>("native");
+        QTest::newRow("unscaled") << 1280 << 720 << false;
+        QTest::newRow("scaled") << 640 << 360 << false;
+        QTest::newRow("unscaled native encoder") << 1280 << 720 << true;
+        QTest::newRow("scaled native encoder") << 640 << 360 << true;
     }
     void zeroCopyEncodeKeepsColours()
     {
         QFETCH(int, w);
         QFETCH(int, h);
+        QFETCH(bool, native);
         QString why;
         auto hw = createVaapiJpegDecoder(&why);
         if (!hw) QSKIP(qPrintable(QStringLiteral("no VA-API JPEG decode: %1").arg(why)));
+        VideoEncoder::setNativeHevc(native);
         VideoEncoder enc;
         VideoEncoder::Config ec;
         ec.width = w;
@@ -131,7 +136,10 @@ private slots:
         ec.fps = 30;
         ec.bitrateKbps = 8000;
         ec.colour = Colour::Bt601Full;
-        if (!enc.init(ec, &why)) QSKIP(qPrintable(QStringLiteral("no hardware HEVC encoder: %1").arg(why)));
+        const bool opened = enc.init(ec, &why);
+        VideoEncoder::setNativeHevc(true); // the default
+        if (!opened) QSKIP(qPrintable(QStringLiteral("no hardware HEVC encoder: %1").arg(why)));
+        if (native) QCOMPARE(enc.name(), QStringLiteral("hevc_vaapi_native"));
         VideoDecoder dec;
         QVERIFY(dec.init(p2p::media::Codec::HEVC, true, &why));
 

@@ -8,6 +8,7 @@
 #include <cstdint>
 #include <functional>
 #include <memory>
+#include <optional>
 
 namespace p2p::video {
 
@@ -39,9 +40,30 @@ public:
     // GPU frame (VideoFrame::gpu) goes to a hardware encoder without a copy,
     // scaled to the encoder's size on the GPU; otherwise the frame must be
     // the encoder's size and have CPU planes.
-    bool encode(const VideoFrame& frame, bool forceKeyframe, const Output& out);
+    // |frameId|: the caller's number for this frame (consecutive), for
+    // reference control; by default the previous one + 1.
+    bool encode(const VideoFrame& frame, bool forceKeyframe, const Output& out,
+                std::optional<uint32_t> frameId = std::nullopt);
     QString name() const;
     bool hardware() const;
+    // Whether setBitrateKbps() works without re-opening (native HEVC only;
+    // FFmpeg's encoders apply rate settings only when opened).
+    bool liveBitrate() const;
+    void setBitrateKbps(int kbps);
+    // During |out|: frames back to the frame this one predicts from (0 for
+    // a keyframe). FFmpeg's encoders: always the previous one.
+    int refBack() const;
+    // Loss recovery without a keyframe (native HEVC): the next frame
+    // predicts from |goodFrameId|, which the receiver decoded, or from an
+    // earlier frame of its chain. False if not possible: send a keyframe.
+    bool recoverFrom(uint32_t goodFrameId);
+    // How far apart the frames kept for recovery are (native HEVC).
+    void setAnchorInterval(int frames);
+
+    // Hardware HEVC on Linux: our own VA-API encoder (hevc_vaapi_encoder.h)
+    // instead of FFmpeg's hevc_vaapi (--encoder native|ffmpeg). Falls back
+    // to FFmpeg if the driver can't. Default on; set before opening encoders.
+    static void setNativeHevc(bool on);
 
 private:
     struct Impl;

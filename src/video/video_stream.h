@@ -46,7 +46,9 @@ struct VideoStreamConfig {
 //   Nack:        repeated { u32 frame id, u16 fragment index (0xffff = whole frame) }.
 // (Kind 3, a video-only loss report, was replaced by transport-wide
 // congestion feedback.)
-enum class VideoFeedback : uint8_t { PictureLoss = 1, Nack = 2 };
+// Recover: u32 id of the last frame the receiver decoded; it lost what came
+// after. The sender answers with a frame predicting from it (or a keyframe).
+enum class VideoFeedback : uint8_t { PictureLoss = 1, Nack = 2, Recover = 3 };
 
 // FEC parity share for the sender's loss estimate: off when the path is
 // clean, otherwise enough to cover roughly twice the loss rate; keyframes
@@ -61,6 +63,7 @@ class VideoSendStream {
 public:
     struct Stats {
         uint64_t captured = 0, encoded = 0, keyframes = 0, pliReceived = 0, bytes = 0, encodeErrors = 0;
+        uint64_t recoverReceived = 0, recoveries = 0; // requests; frames sent that predict from the receiver's last
         uint64_t nackItems = 0, retransmitted = 0, retransmitMisses = 0, parityFragments = 0;
         double encodeAvgMs = 0, encodeMaxMs = 0;
         double kbps = 0, fps = 0;
@@ -116,6 +119,8 @@ private:
     int ladderSrcW_ = 0, ladderSrcH_ = 0;
     std::unique_ptr<VideoEncoder> encoder_;
     bool encoderFailed_ = false;
+    int encW_ = 0, encH_ = 0, encKbps_ = 0; // what the open encoder makes
+    bool liveRate_ = false; // the encoder retargets without re-opening: same-size rung switches keep it
     Colour encoderColour_ = Colour::Bt709Limited;
     std::unique_ptr<RungSelector> ladder_;
     SwsContext* sws_ = nullptr;
@@ -124,6 +129,7 @@ private:
     double fecCap_ = 1.0; // auto FEC may only use the budget left above the current rung
     uint32_t frameId_ = 0;
     std::atomic<bool> forceKeyframe_{true};
+    std::atomic<int64_t> recoverFrom_{-1}; // frame id from a Recover request, -1 = none
     std::atomic<int64_t> skipQueueUs_{50'000}; // pacer backlog above which new frames are skipped
     bool sendingPattern_ = false;
     std::atomic<double> lossEstimate_{0.0};
@@ -146,7 +152,7 @@ class VideoReceiveStream {
 public:
     struct Stats {
         FrameAssembler::Stats assembler;
-        uint64_t decoded = 0, decodeErrors = 0, pliSent = 0, patternOk = 0, patternBad = 0;
+        uint64_t decoded = 0, decodeErrors = 0, pliSent = 0, recoverSent = 0, patternOk = 0, patternBad = 0;
         uint64_t recoveredDecoded = 0; // frames that needed FEC or a resend
         double decodeAvgMs = 0;
         double latencyAvgMs = -1, latencyP95Ms = -1; // capture -> decoded (excl. display)
@@ -179,6 +185,9 @@ private:
     void onFragment(const uint8_t* data, size_t len, int64_t arrivalUs);
     void decodeLoop();
     void requestKeyframe(int64_t nowUs);
+    // After a loss: ask the sender to predict from |good| (the last frame
+    // decoded); a keyframe if there is none or that keeps failing.
+    void requestRecovery(int64_t nowUs, std::optional<uint32_t> good, int64_t rttUs);
     void sendNacks(const std::vector<NackItem>& items);
     void updatePathLoss(int64_t nowUs);
 
@@ -199,6 +208,7 @@ private:
     std::atomic<int64_t> clockOffsetUs_{0};
     std::atomic<int64_t> rttUs_{1000};
     int64_t lastPliUs_ = 0;
+    int recoverTries_ = 0; // requests for the current loss
     int64_t firstFragmentUs_ = 0; // decode thread's first sight of the stream
     uint32_t lastPattern_ = 0;
     bool havePattern_ = false;

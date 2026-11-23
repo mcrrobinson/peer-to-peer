@@ -19,6 +19,7 @@ namespace p2p::video {
 
 namespace {
 constexpr int64_t kPliIntervalUs = 100'000;
+constexpr int kMaxRecoverTries = 3; // then a keyframe
 constexpr size_t kLatencyWindow = 240;
 constexpr int64_t kPathLossIntervalUs = 200'000;
 constexpr int64_t kHistoryUs = 1'000'000;
@@ -90,6 +91,17 @@ void VideoSendStream::onFeedback(const uint8_t* d, size_t n)
         }
         std::lock_guard l(statsMutex_);
         ++st_.pliReceived;
+        return;
+    }
+    case VideoFeedback::Recover: {
+        if (n < 5) return;
+        recoverFrom_ = int64_t(getU32(d + 1));
+        {
+            std::lock_guard sl(sourceMutex_);
+            if (source_) source_->requestFrame();
+        }
+        std::lock_guard l(statsMutex_);
+        ++st_.recoverReceived;
         return;
     }
     case VideoFeedback::Nack: {
@@ -222,6 +234,10 @@ bool VideoSendStream::openEncoder(const Rung& r, int fps)
         return false;
     }
     encoder_ = std::move(enc);
+    encW_ = r.width;
+    encH_ = r.height;
+    encKbps_ = r.kbps;
+    liveRate_ = encoder_->liveBitrate();
     const double ms = double(nowUs() - t0) / 1000.0;
     std::lock_guard l(statsMutex_);
     st_.encoder = encoder_->name();
@@ -294,7 +310,8 @@ void VideoSendStream::onFrame(std::shared_ptr<VideoFrame> f)
                                              .arg(r.width)
                                              .arg(r.height)
                                              .arg(budget, 0, 'f', 0);
-            encoder_.reset();
+            // A live-rate encoder keeps going at the same size: no keyframe.
+            if (!(encoder_ && liveRate_ && r.width == encW_ && r.height == encH_)) encoder_.reset();
         }
         // FEC may only use what is left above the chosen rung: at the lowest
         // rung, loss-driven FEC must not push the stream past the target.
@@ -320,6 +337,11 @@ void VideoSendStream::onFrame(std::shared_ptr<VideoFrame> f)
         encoderFailed_ = true;
         return;
     }
+    // Same-size rung switch on a live-rate encoder: just the new target.
+    if (encKbps_ != ladder_->rung().kbps) {
+        encKbps_ = ladder_->rung().kbps;
+        encoder_->setBitrateKbps(encKbps_);
+    }
     const Rung rung = ladder_->rung();
     // A GPU frame goes to a hardware encoder as is (scaled there, on the
     // GPU); anything else is scaled here on the CPU.
@@ -328,7 +350,17 @@ void VideoSendStream::onFrame(std::shared_ptr<VideoFrame> f)
                                                           : nullptr;
     if (!in) return;
 
-    const bool key = forceKeyframe_.exchange(false);
+    bool key = forceKeyframe_.exchange(false);
+    // Keep frames for recovery about as far apart as a loss takes to come
+    // back as a request (the receiver's grace + half a round trip).
+    const int64_t rtt = std::max<int64_t>(transport_.ccStats().srttUs, 0);
+    encoder_->setAnchorInterval(std::clamp(int((rtt * 11 / 2 + 30'000) * fps / 2'000'000), 2, fps));
+    const int64_t recoverId = recoverFrom_.exchange(-1);
+    bool recovering = false;
+    if (recoverId >= 0 && !key) {
+        recovering = encoder_->recoverFrom(uint32_t(recoverId));
+        key = !recovering;
+    }
     const int64_t t0 = nowUs();
     size_t bytes = 0, parity = 0;
     bool wasKey = false;
@@ -344,6 +376,7 @@ void VideoSendStream::onFrame(std::shared_ptr<VideoFrame> f)
         opt.extraFlags = sendingPattern_ ? FragmentHeader::kTestPattern : 0;
         opt.width = uint16_t(rung.width);
         opt.height = uint16_t(rung.height);
+        opt.refBack = uint8_t(std::clamp(encoder_->refBack(), 0, 255));
         switch (cfg_.fec) {
         case VideoStreamConfig::Fec::Off: break;
         case VideoStreamConfig::Fec::Auto:
@@ -379,7 +412,7 @@ void VideoSendStream::onFrame(std::shared_ptr<VideoFrame> f)
                 history_.pop_front();
             }
         }
-    });
+    }, frameId_);
     const double ms = double(nowUs() - t0) / 1000.0;
 
     std::lock_guard l(statsMutex_);
@@ -390,6 +423,7 @@ void VideoSendStream::onFrame(std::shared_ptr<VideoFrame> f)
     if (bytes == 0) return;
     ++st_.encoded;
     if (wasKey) ++st_.keyframes;
+    if (recovering && !wasKey) ++st_.recoveries;
     st_.bytes += bytes;
     st_.parityFragments += parity;
     st_.fecRate = fecRate;
@@ -474,6 +508,23 @@ void VideoReceiveStream::requestKeyframe(int64_t nowUs)
     ++st_.pliSent;
 }
 
+void VideoReceiveStream::requestRecovery(int64_t nowUs, std::optional<uint32_t> good, int64_t rttUs)
+{
+    // The answer takes a round trip: don't ask again before it could come.
+    if (nowUs - lastPliUs_ < std::max<int64_t>(kPliIntervalUs, rttUs * 6 / 5 + 10'000)) return;
+    if (!good || recoverTries_ >= kMaxRecoverTries) {
+        requestKeyframe(nowUs);
+        return;
+    }
+    lastPliUs_ = nowUs;
+    ++recoverTries_;
+    uint8_t msg[5] = {uint8_t(VideoFeedback::Recover)};
+    putU32(msg + 1, *good);
+    transport_.send(net::wire::kFeedback, streamId_, msg, sizeof(msg));
+    std::lock_guard l(statsMutex_);
+    ++st_.recoverSent;
+}
+
 void VideoReceiveStream::sendNacks(const std::vector<NackItem>& items)
 {
     uint8_t buf[net::wire::kMaxPayload];
@@ -511,6 +562,7 @@ void VideoReceiveStream::decodeLoop()
         std::vector<AssembledFrame> frames;
         std::vector<NackItem> nacks;
         bool needKey = false;
+        std::optional<uint32_t> lastGood;
         bool synced = false;
         int64_t grace = 0;
         // Media-path RTT (it includes pacer and bottleneck queues), not just
@@ -537,6 +589,7 @@ void VideoReceiveStream::decodeLoop()
             }
             frames = assembler_.poll(now);
             needKey = assembler_.needKeyframe();
+            lastGood = assembler_.lastReleased();
             synced = assembler_.stats().framesReleased > 0;
             grace = assembler_.reorderGraceUs();
             if (firstFragmentUs_ == 0 && assembler_.stats().fragments > 0) firstFragmentUs_ = now;
@@ -549,7 +602,8 @@ void VideoReceiveStream::decodeLoop()
         // FEC / NACK the same grace a later loss gets; after that the
         // assembler has already waited when it reports a loss.
         if (needKey && firstFragmentUs_ != 0 && (synced || nowUs() - firstFragmentUs_ >= grace))
-            requestKeyframe(nowUs());
+            requestRecovery(nowUs(), lastGood, rtt);
+        if (!needKey) recoverTries_ = 0;
 
         for (auto& f : frames) {
             const int64_t t0 = nowUs();
