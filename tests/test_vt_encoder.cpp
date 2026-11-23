@@ -2,13 +2,17 @@
 // keyframes on demand, live bitrate, LTR loss recovery, colours. Decoded
 // with FFmpeg's software HEVC decoder. Pattern frames only -- never opens
 // the camera. Skips without a hardware HEVC encoder.
+#include "video/cv_image.h"
 #include "video/video_decoder.h"
 #include "video/video_encoder.h"
+
+#include <CoreVideo/CoreVideo.h>
 
 #include <QTest>
 
 #include <algorithm>
 #include <cmath>
+#include <cstring>
 
 using namespace p2p::video;
 
@@ -46,6 +50,94 @@ bool openNative(VideoEncoder& enc, int w, int h, int kbps, Colour colour = Colou
     c.colour = colour;
     QString why;
     return enc.init(c, &why) && enc.name() == QLatin1String("hevc_videotoolbox_native");
+}
+
+// Smooth moving picture (no edges, no noise): any decent scaler agrees with
+// a box average on it, so a scaled GPU frame can be checked against one.
+void smooth(VideoFrame& f, int n)
+{
+    for (int y = 0; y < f.height; ++y)
+        for (int x = 0; x < f.width; ++x)
+            f.y()[size_t(y) * size_t(f.width) + size_t(x)] =
+                uint8_t(128 + 70 * std::sin(x * 0.031 + n * 0.2) * std::cos(y * 0.023 - n * 0.1));
+    for (int y = 0; y < f.height / 2; ++y)
+        for (int x = 0; x < f.width / 2; ++x) {
+            f.uv()[size_t(y) * size_t(f.width) + size_t(2 * x)] = uint8_t(128 + 40 * std::sin(x * 0.04 + n * 0.1));
+            f.uv()[size_t(y) * size_t(f.width) + size_t(2 * x + 1)] = uint8_t(128 + 40 * std::cos(y * 0.05));
+        }
+}
+
+// |f| copied into a new IOSurface-backed 420v CVPixelBuffer, as a GPU frame
+// (what the camera delivers).
+std::shared_ptr<VideoFrame> onGpu(const VideoFrame& f)
+{
+    CFMutableDictionaryRef attrs =
+        CFDictionaryCreateMutable(nullptr, 0, &kCFTypeDictionaryKeyCallBacks, &kCFTypeDictionaryValueCallBacks);
+    CFDictionaryRef none = CFDictionaryCreate(nullptr, nullptr, nullptr, 0, &kCFTypeDictionaryKeyCallBacks,
+                                              &kCFTypeDictionaryValueCallBacks);
+    CFDictionarySetValue(attrs, kCVPixelBufferIOSurfacePropertiesKey, none);
+    CVPixelBufferRef pb = nullptr;
+    CVPixelBufferCreate(nullptr, size_t(f.width), size_t(f.height), kCVPixelFormatType_420YpCbCr8BiPlanarVideoRange,
+                        attrs, &pb);
+    CFRelease(none);
+    CFRelease(attrs);
+    if (!pb) return nullptr;
+    CVPixelBufferLockBaseAddress(pb, 0);
+    for (size_t p = 0; p < 2; ++p) {
+        auto* dst = static_cast<uint8_t*>(CVPixelBufferGetBaseAddressOfPlane(pb, p));
+        const size_t stride = CVPixelBufferGetBytesPerRowOfPlane(pb, p);
+        for (int r = 0; r < (p ? f.height / 2 : f.height); ++r)
+            std::memcpy(dst + size_t(r) * stride, (p ? f.uv() : f.y()) + size_t(r) * size_t(f.width), size_t(f.width));
+    }
+    CVPixelBufferUnlockBaseAddress(pb, 0);
+    auto g = std::make_shared<VideoFrame>();
+    g->width = f.width;
+    g->height = f.height;
+    g->gpu = wrapCvPixelBuffer(pb);
+    CVPixelBufferRelease(pb);
+    return g;
+}
+
+// Luma PSNR of |a| against |ref| scaled down to |a|'s size by averaging.
+double lumaPsnr(const VideoFrame& a, const VideoFrame& ref)
+{
+    const int sx = ref.width / a.width, sy = ref.height / a.height;
+    double se = 0;
+    for (int y = 0; y < a.height; ++y)
+        for (int x = 0; x < a.width; ++x) {
+            int sum = 0;
+            for (int j = 0; j < sy; ++j)
+                for (int i = 0; i < sx; ++i) sum += ref.y()[size_t(y * sy + j) * size_t(ref.width) + size_t(x * sx + i)];
+            const double d = a.y()[size_t(y) * size_t(a.width) + size_t(x)] - double(sum) / (sx * sy);
+            se += d * d;
+        }
+    const double mse = se / (double(a.width) * a.height);
+    return mse > 0 ? 10 * std::log10(255.0 * 255.0 / mse) : 99;
+}
+
+// |ref| scaled down by averaging (both planes), as a CPU frame of |w| x |h|.
+VideoFrame boxScaled(const VideoFrame& ref, int w, int h)
+{
+    VideoFrame o;
+    o.allocate(w, h);
+    const int sx = ref.width / w, sy = ref.height / h;
+    for (int y = 0; y < h; ++y)
+        for (int x = 0; x < w; ++x) {
+            int sum = 0;
+            for (int j = 0; j < sy; ++j)
+                for (int i = 0; i < sx; ++i) sum += ref.y()[size_t(y * sy + j) * size_t(ref.width) + size_t(x * sx + i)];
+            o.y()[size_t(y) * size_t(w) + size_t(x)] = uint8_t(sum / (sx * sy));
+        }
+    for (int y = 0; y < h / 2; ++y)
+        for (int x = 0; x < w / 2; ++x)
+            for (int c = 0; c < 2; ++c) {
+                int sum = 0;
+                for (int j = 0; j < sy; ++j)
+                    for (int i = 0; i < sx; ++i)
+                        sum += ref.uv()[size_t(y * sy + j) * size_t(ref.width) + size_t(2 * (x * sx + i) + c)];
+                o.uv()[size_t(y) * size_t(w) + size_t(2 * x + c)] = uint8_t(sum / (sx * sy));
+            }
+    return o;
 }
 
 } // namespace
@@ -297,6 +389,68 @@ private slots:
             ++frames;
         }
         QVERIFY(frames >= 28);
+    }
+
+    // GPU frames (CVPixelBuffers, as from the camera) go in without a CPU
+    // copy: as is at the encoder's size, scaled on the GPU otherwise.
+    void takesGpuFrames_data()
+    {
+        QTest::addColumn<int>("w");
+        QTest::addColumn<int>("h");
+        QTest::newRow("same size 1280x720") << 1280 << 720;
+        QTest::newRow("scaled to 640x360") << 640 << 360;
+        QTest::newRow("scaled to 320x180") << 320 << 180;
+    }
+    void takesGpuFrames()
+    {
+        QFETCH(int, w);
+        QFETCH(int, h);
+        // Reference: the same pictures scaled on the CPU (box average) and
+        // sent as CPU frames. Smooth pictures: the GPU scaler's filter is
+        // softer than a box, which would only show on edges and noise.
+        VideoEncoder enc, cpuEnc;
+        if (!openNative(enc, w, h, 4000) || !openNative(cpuEnc, w, h, 4000)) QSKIP("no native VideoToolbox HEVC encoder");
+        QVERIFY(enc.takesGpuFrames());
+        VideoDecoder dec, cpuDec;
+        QString why;
+        QVERIFY(dec.init(p2p::media::Codec::HEVC, false, &why));
+        QVERIFY(cpuDec.init(p2p::media::Codec::HEVC, false, &why));
+        double worst = 99, cpuWorst = 99;
+        int frames = 0;
+        for (int i = 0; i < 20; ++i) {
+            VideoFrame src;
+            src.allocate(1280, 720);
+            smooth(src, i);
+            auto g = onGpu(src);
+            QVERIFY(g);
+            std::vector<uint8_t> bits;
+            QVERIFY(enc.encode(*g, i == 0, [&](const uint8_t* d, size_t n, bool) { bits.insert(bits.end(), d, d + n); }));
+            QVERIFY2(g->data.empty(), "the encoder read the GPU frame back");
+            if (bits.empty()) continue;
+            bool err = false;
+            auto out = dec.decode(bits.data(), bits.size(), &err);
+            QVERIFY(out && !err);
+            QCOMPARE(out->width, w);
+            QCOMPARE(out->height, h);
+            QVERIFY(out->ensureCpu());
+            if (i >= 5) worst = std::min(worst, lumaPsnr(*out, src));
+            ++frames;
+
+            const VideoFrame small = boxScaled(src, w, h);
+            bits.clear();
+            QVERIFY(cpuEnc.encode(small, i == 0, [&](const uint8_t* d, size_t n, bool) { bits.insert(bits.end(), d, d + n); }));
+            if (bits.empty()) continue;
+            auto ref = cpuDec.decode(bits.data(), bits.size(), &err);
+            QVERIFY(ref && !err && ref->ensureCpu());
+            if (i >= 5) cpuWorst = std::min(cpuWorst, lumaPsnr(*ref, src));
+        }
+        qInfo("%dx%d from 1280x720: worst luma PSNR over frames 5-19 vs the source, GPU frames %.1f dB, CPU-scaled "
+              "frames %.1f dB",
+              w, h, worst, cpuWorst);
+        QVERIFY(frames >= 18);
+        // Wrong geometry or colours would be far below 30 dB; at 1/4 size
+        // the softer GPU filter costs ~6 dB against the box (40 vs 46 dB).
+        QVERIFY2(worst > 35, "GPU frames don't match the (scaled) source");
     }
 
     void signalsColours()

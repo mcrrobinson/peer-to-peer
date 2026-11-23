@@ -354,7 +354,7 @@ void VideoSendStream::onFrame(std::shared_ptr<VideoFrame> f)
     const Rung rung = ladder_->rung();
     // A GPU frame goes to a hardware encoder as is (scaled there, on the
     // GPU); anything else is scaled here on the CPU.
-    const VideoFrame* in = f->gpu && encoder_->hardware() ? f.get()
+    const VideoFrame* in = f->gpu && encoder_->takesGpuFrames() ? f.get()
                          : f->ensureCpu()                 ? scaled(*f, rung.width, rung.height)
                                                           : nullptr;
     if (!in) return;

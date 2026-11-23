@@ -46,6 +46,10 @@ public:
                 std::optional<uint32_t> frameId = std::nullopt);
     QString name() const;
     bool hardware() const;
+    // Whether encode() takes any GPU frame as is (scaling it on the GPU):
+    // hardware encoders on Linux (VA-API surfaces), the native VideoToolbox
+    // one on macOS. Otherwise GPU frames need CPU planes at the right size.
+    bool takesGpuFrames() const;
     // Whether setBitrateKbps() works without re-opening (native HEVC only;
     // FFmpeg's encoders apply rate settings only when opened).
     bool liveBitrate() const;

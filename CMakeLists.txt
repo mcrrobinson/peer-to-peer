@@ -1,5 +1,8 @@
 cmake_minimum_required(VERSION 3.24)
 project(P2PCall VERSION 0.1.0 LANGUAGES CXX)
+if(APPLE)
+    enable_language(OBJCXX) # AVFoundation camera, Metal import
+endif()
 
 set(CMAKE_CXX_STANDARD 20)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
@@ -102,11 +105,13 @@ if(CMAKE_SYSTEM_NAME STREQUAL "Linux")
     # Per-pixel colour conversion on the camera path: optimise even in Debug.
     set_source_files_properties(src/video/jpeg_decode.cpp PROPERTIES COMPILE_OPTIONS "-O3")
 elseif(APPLE)
-    target_sources(p2pcore PRIVATE src/video/codec_probe_macos.cpp src/video/camera_none.cpp
+    target_sources(p2pcore PRIVATE src/video/codec_probe_macos.cpp src/video/camera_avfoundation.mm
+                                   src/video/cv_image.h src/video/cv_image.cpp
                                    src/video/screen_none.cpp
                                    src/video/hevc_vt_encoder.cpp)
+    set_source_files_properties(src/video/camera_avfoundation.mm PROPERTIES COMPILE_OPTIONS "-fobjc-arc")
     target_link_libraries(p2pcore PRIVATE "-framework VideoToolbox" "-framework CoreMedia" "-framework CoreVideo"
-                                          "-framework CoreFoundation")
+                                          "-framework CoreFoundation" "-framework AVFoundation" "-framework Foundation")
 else()
     target_sources(p2pcore PRIVATE src/video/codec_probe_generic.cpp src/video/camera_none.cpp
                                    src/video/screen_none.cpp)
@@ -136,9 +141,12 @@ endif()
 target_link_libraries(p2pcall PRIVATE p2pcore Qt6::Gui Qt6::GuiPrivate Qt6::Quick)
 if(APPLE)
     # VideoToolbox frames -> Metal textures without a copy (Objective-C++).
-    enable_language(OBJCXX)
     target_sources(p2pcall PRIVATE src/app/metal_nv12_import.h src/app/metal_nv12_import.mm)
     target_link_libraries(p2pcall PRIVATE "-framework Metal" "-framework CoreVideo")
+    # Usage strings for the camera / microphone prompts, embedded in the
+    # executable (a bare binary has no bundle to carry an Info.plist).
+    target_link_options(p2pcall PRIVATE "LINKER:-sectcreate,__TEXT,__info_plist,${CMAKE_SOURCE_DIR}/macos/Info.plist")
+    set_property(TARGET p2pcall APPEND PROPERTY LINK_DEPENDS ${CMAKE_SOURCE_DIR}/macos/Info.plist)
 endif()
 target_include_directories(p2pcall PRIVATE src/app) # qmltyperegistrar includes headers by bare name
 target_compile_options(p2pcall PRIVATE -Wall -Wextra)
@@ -167,8 +175,13 @@ if(P2P_BUILD_TESTS)
         add_test(NAME test_hevc_encoder COMMAND test_hevc_encoder)
     elseif(APPLE)
         qt_add_executable(test_vt_encoder tests/test_vt_encoder.cpp)
-        target_link_libraries(test_vt_encoder PRIVATE p2pcore Qt6::Test)
+        target_link_libraries(test_vt_encoder PRIVATE p2pcore Qt6::Test "-framework CoreVideo" "-framework CoreFoundation")
         add_test(NAME test_vt_encoder COMMAND test_vt_encoder)
+        # The real camera (skips unless access was already granted).
+        qt_add_executable(test_camera_macos tests/test_camera_macos.mm)
+        set_source_files_properties(tests/test_camera_macos.mm PROPERTIES COMPILE_OPTIONS "-fobjc-arc")
+        target_link_libraries(test_camera_macos PRIVATE p2pcore Qt6::Test "-framework AVFoundation" "-framework Foundation")
+        add_test(NAME test_camera_macos COMMAND test_camera_macos)
         # Renderer on Metal: imported VideoToolbox frames vs uploaded ones (opens a window).
         qt_add_executable(test_video_view tests/test_video_view.cpp src/app/video_view.h src/app/video_view.cpp
                           src/app/metal_nv12_import.h src/app/metal_nv12_import.mm)

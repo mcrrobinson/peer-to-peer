@@ -350,6 +350,27 @@ Congestion control (phase 6), in `MediaTransport` because it sees every packet:
             The UDP media socket has no SO_REUSEADDR, so macOS already refuses there (test added).
             (b) test_call's `runImpaired` read null stats after a failed call wait and crashed the
             suite (any platform); it now returns early. 12/12 suites, test_call 22/22 × 3.
+      - [x] 3 AVFoundation camera (2026-11-23). `camera_avfoundation.mm`: AVCaptureVideoDataOutput,
+            420v, late frames discarded; frames stay CVPixelBuffers (`cv_image.h`, shared with the
+            decoder) → preview via the Metal import, encoder takes them as is (`takesGpuFrames()`;
+            same size: no copy at all; other rung sizes: `VTPixelTransferSession` on the GPU).
+            M3 FaceTime HD: 420v BT.709 limited, 15–30 fps at 1920×1080, 1280×720, 640×480 (+ portrait
+            and square). `--camera default|<unique ID>|<name part>`; nearest covering landscape
+            format, fps capped at the camera's. Quirks: `startRunning` re-applies the session preset
+            (1080p), so the format is set after it and preset-size frames are skipped; sample
+            timestamps are host time (stops in sleep) → age carried over to `nowUs()`. Access is
+            asked for on the capture queue (call start doesn't block; a late answer after hang-up
+            is ignored); denied → error with the Settings path. Info.plist (usage strings)
+            embedded in the binary with `-sectcreate` until step 5's bundle; from a terminal, TCC
+            asks on behalf of the terminal app. Results: timestamp→delivery 41–49 ms steady
+            (startup frames up to ~250 ms) — the camera pipeline, not ours; no video effects on,
+            system-wide gesture Reactions enabled (user setting, untested whether it costs).
+            Calls: 720p30 enc 4.1 ms, 1080p30 enc 7.2 ms, capture→decoded 50–55 ms; local preview
+            capture→screen 56 ms; `--sim-rate 800` → 480×270 GPU-scaled, no errors. The GPU scaler
+            filters softer than a box (−1.7 dB at 1/2, −6 dB at 1/4 on a smooth picture vs box +
+            CPU path; `DownsamplingMode` changes nothing). Tests: `test_camera_macos` (real camera,
+            skips unless access already granted), `test_vt_encoder::takesGpuFrames`. 13/13 suites.
+            To do: glass-to-glass with `latency_probe` (needs the camera pointed at the screen).
 
 Also outstanding: active A/V sync (latencies are reported only); the AV1 software encoder bug below.
 

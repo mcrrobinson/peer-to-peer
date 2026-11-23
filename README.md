@@ -17,8 +17,8 @@ Headless/scripted: `p2pcall --headless --instance 2 --auto-accept --exit-after-c
 (prints `CALL_ESTABLISHED …` / `STATS …` / `CALL_ENDED …`). `--prefer-av1 camera|screen|both`.
 
 ## Video and loss testing
-`--video-source camera|pattern|none` (only one instance can hold the camera; use `pattern` for the
-other), `--video-size 1920x1080 --video-fps 60 --video-bitrate 12000 --camera-format auto|mjpeg|nv12`.
+`--video-source camera|pattern|none` (Linux: only one instance can hold the camera; use `pattern`
+for the other; macOS: `--camera default|<name>`, access asked on first use), `--video-size 1920x1080 --video-fps 60 --video-bitrate 12000 --camera-format auto|mjpeg|nv12`.
 Loss recovery: `--fec auto|off|<pct>`, `--no-nack`. Simulated loss: `--sim-loss <pct> --sim-burst <n>`.
 Real delay/jitter needs root: `sudo tests/net/netem.sh on wan|bottleneck` … `sudo tests/net/netem.sh off`.
 Congestion control is on by default (`--cc off` = fixed bitrate; `--video-bitrate` is then the maximum,

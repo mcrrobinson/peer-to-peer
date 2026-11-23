@@ -73,7 +73,11 @@ int main(int argc, char** argv)
                     exitAfterOpt, preferAv1Opt, audioSourceOpt, audioIoOpt, noApmOpt, audioBitrateOpt,
                     audioLowDelayOpt, periodOpt, simLossOpt, noMediaOpt, aecOpt, nsOpt, agcOpt});
     QCommandLineOption videoSourceOpt("video-source", "Video to send: camera, pattern, flash (for tools/latency_probe) or none.", "src", "camera");
+#ifdef Q_OS_MACOS
+    QCommandLineOption cameraOpt("camera", "Camera: default, or a unique ID or part of the name.", "device", "default");
+#else
     QCommandLineOption cameraOpt("camera", "V4L2 camera device.", "device", "/dev/video0");
+#endif
     QCommandLineOption videoSizeOpt("video-size", "Capture size WxH.", "WxH", "1920x1080");
     QCommandLineOption videoFpsOpt("video-fps", "Capture frame rate.", "fps", "60");
     QCommandLineOption videoBitrateOpt("video-bitrate", "Video bitrate in kbps (the maximum with --cc on).", "kbps",

@@ -1,7 +1,7 @@
 #include "video/video_decoder.h"
 
 #ifdef __APPLE__
-#include <CoreVideo/CoreVideo.h>
+#include "video/cv_image.h"
 #else
 #include "video/vaapi_device.h"
 #endif
@@ -91,21 +91,7 @@ public:
     ~DecodedImage() override { av_frame_free(&frame_); }
     void* nv12Surface(int, int) override { return nullptr; }
     void* cvPixelBuffer() override { return frame_->data[3]; }
-    bool download(VideoFrame& f) override
-    {
-        auto pb = reinterpret_cast<CVPixelBufferRef>(frame_->data[3]);
-        if (CVPixelBufferGetPlaneCount(pb) != 2 || CVPixelBufferLockBaseAddress(pb, kCVPixelBufferLock_ReadOnly) != kCVReturnSuccess)
-            return false;
-        for (size_t p = 0; p < 2; ++p) {
-            const auto* src = static_cast<const uint8_t*>(CVPixelBufferGetBaseAddressOfPlane(pb, p));
-            const size_t stride = CVPixelBufferGetBytesPerRowOfPlane(pb, p);
-            uint8_t* dst = p ? f.uv() : f.y();
-            for (int r = 0; r < (p ? f.height / 2 : f.height); ++r)
-                std::memcpy(dst + size_t(r) * size_t(f.width), src + size_t(r) * stride, size_t(f.width));
-        }
-        CVPixelBufferUnlockBaseAddress(pb, kCVPixelBufferLock_ReadOnly);
-        return true;
-    }
+    bool download(VideoFrame& f) override { return copyCvPixelBuffer(frame_->data[3], f); }
 
 private:
     AVFrame* frame_;

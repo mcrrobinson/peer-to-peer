@@ -84,6 +84,15 @@ VideoEncoder::~VideoEncoder() = default;
 
 bool VideoEncoder::hardware() const { return d->cfg.hardware; }
 
+bool VideoEncoder::takesGpuFrames() const
+{
+#ifdef __APPLE__
+    return d->vt != nullptr;
+#else
+    return d->cfg.hardware;
+#endif
+}
+
 void VideoEncoder::setNativeHevc(bool on) { gNativeHevc = on; }
 
 bool VideoEncoder::liveBitrate() const

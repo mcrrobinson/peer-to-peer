@@ -43,10 +43,12 @@ public:
     // False (|why| set) without a hardware HEVC encoder with low-latency
     // rate control.
     bool init(const Config& cfg, QString* why);
-    // Encodes CPU NV12 frame |f| (the configured size) as frame |id| (the
+    // Encodes frame |f| as frame |id| (the
     // caller's numbering, consecutive over frames that produced output);
     // |out| gets the access unit, on this thread, before this returns.
-    // True with no output if the encoder dropped the frame.
+    // True with no output if the encoder dropped the frame. |f| is a GPU
+    // frame with a CVPixelBuffer (taken as is, or scaled on the GPU to the
+    // configured size) or CPU NV12 at the configured size.
     bool encode(const VideoFrame& f, uint32_t id, bool forceKeyframe, const Output& out);
     // Frames back from the last encoded frame to its reference (0: keyframe).
     int lastRefBack() const;

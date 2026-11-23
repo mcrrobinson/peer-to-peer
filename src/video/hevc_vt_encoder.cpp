@@ -49,6 +49,7 @@ void appendStartCode(std::vector<uint8_t>& v) { v.insert(v.end(), {0, 0, 0, 1});
 struct HevcVtEncoder::Impl {
     Config cfg;
     VTCompressionSessionRef session = nullptr;
+    VTPixelTransferSessionRef scaler = nullptr; // GPU frames of another size
 
     // Filled by the output callback (VideoToolbox's thread) for |waitingSeq|.
     std::mutex m;
@@ -74,6 +75,10 @@ struct HevcVtEncoder::Impl {
 
     ~Impl()
     {
+        if (scaler) {
+            VTPixelTransferSessionInvalidate(scaler);
+            CFRelease(scaler);
+        }
         if (session) {
             VTCompressionSessionCompleteFrames(session, kCMTimeInvalid);
             VTCompressionSessionInvalidate(session);
@@ -201,24 +206,52 @@ bool HevcVtEncoder::init(const Config& cfg, QString* why)
 
 bool HevcVtEncoder::encode(const VideoFrame& f, uint32_t id, bool forceKeyframe, const Output& out)
 {
-    if (!d->session || f.width != d->cfg.width || f.height != d->cfg.height || !f.ensureCpu()) return false;
-    CVPixelBufferPoolRef pool = VTCompressionSessionGetPixelBufferPool(d->session);
+    if (!d->session) return false;
+    // A frame already on the GPU (camera, decoder) goes in as is, or scaled
+    // on the GPU to the session's size; CPU frames are copied into a buffer
+    // from the session's pool.
+    auto* gpuPb = f.gpu ? static_cast<CVPixelBufferRef>(f.gpu->cvPixelBuffer()) : nullptr;
+    const bool sameSize = f.width == d->cfg.width && f.height == d->cfg.height;
+    if (!gpuPb && (!sameSize || !f.ensureCpu())) return false;
     CVPixelBufferRef pb = nullptr;
-    if (!pool || CVPixelBufferPoolCreatePixelBuffer(nullptr, pool, &pb) != kCVReturnSuccess) {
-        qCWarning(lcVt) << "no pixel buffer";
-        return false;
+    if (gpuPb && sameSize && int(CVPixelBufferGetWidth(gpuPb)) == f.width && int(CVPixelBufferGetHeight(gpuPb)) == f.height) {
+        pb = CVPixelBufferRetain(gpuPb);
+    } else {
+        CVPixelBufferPoolRef pool = VTCompressionSessionGetPixelBufferPool(d->session);
+        if (!pool || CVPixelBufferPoolCreatePixelBuffer(nullptr, pool, &pb) != kCVReturnSuccess) {
+            qCWarning(lcVt) << "no pixel buffer";
+            return false;
+        }
     }
     CfRef<CVPixelBufferRef> pbRef(pb);
-    CVPixelBufferLockBaseAddress(pb, 0);
-    for (size_t p = 0; p < 2; ++p) {
-        auto* dst = static_cast<uint8_t*>(CVPixelBufferGetBaseAddressOfPlane(pb, p));
-        const size_t stride = CVPixelBufferGetBytesPerRowOfPlane(pb, p);
-        const uint8_t* src = p ? f.uv() : f.y();
-        const int rows = p ? f.height / 2 : f.height;
-        for (int r = 0; r < rows; ++r)
-            std::memcpy(dst + size_t(r) * stride, src + size_t(r) * size_t(f.width), size_t(f.width));
+    if (gpuPb && pb != gpuPb) {
+        if (!d->scaler) {
+            OSStatus st = VTPixelTransferSessionCreate(nullptr, &d->scaler);
+            if (st != noErr) {
+                qCWarning(lcVt) << "VTPixelTransferSessionCreate:" << st;
+                return false;
+            }
+            // Whole picture into the whole buffer (aspect kept by the ladder).
+            // Its filter is smoother than a box average (filtered, no aliasing).
+            VTSessionSetProperty(d->scaler, kVTPixelTransferPropertyKey_ScalingMode, kVTScalingMode_Normal);
+        }
+        const OSStatus st = VTPixelTransferSessionTransferImage(d->scaler, gpuPb, pb);
+        if (st != noErr) {
+            qCWarning(lcVt) << "VTPixelTransferSessionTransferImage:" << st;
+            return false;
+        }
+    } else if (!gpuPb) {
+        CVPixelBufferLockBaseAddress(pb, 0);
+        for (size_t p = 0; p < 2; ++p) {
+            auto* dst = static_cast<uint8_t*>(CVPixelBufferGetBaseAddressOfPlane(pb, p));
+            const size_t stride = CVPixelBufferGetBytesPerRowOfPlane(pb, p);
+            const uint8_t* src = p ? f.uv() : f.y();
+            const int rows = p ? f.height / 2 : f.height;
+            for (int r = 0; r < rows; ++r)
+                std::memcpy(dst + size_t(r) * stride, src + size_t(r) * size_t(f.width), size_t(f.width));
+        }
+        CVPixelBufferUnlockBaseAddress(pb, 0);
     }
-    CVPixelBufferUnlockBaseAddress(pb, 0);
 
     // Per-frame options: a keyframe, or an LTR refresh after a loss.
     CfRef<CFMutableDictionaryRef> opts;
