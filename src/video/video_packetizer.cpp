@@ -68,7 +68,7 @@ std::optional<FragmentHeader> FragmentHeader::read(const uint8_t* p, size_t len)
 
 size_t packetizeFrame(uint32_t frameId, int64_t captureUs, bool keyframe, uint8_t codec, const uint8_t* data,
                       size_t size, size_t maxPayload,
-                      const std::function<void(const uint8_t* payload, size_t len)>& emit,
+                      const std::function<void(const uint8_t* payload, size_t len)>& sendFragment,
                       const PacketizeOptions& opt)
 {
     if (maxPayload <= FragmentHeader::kSize + kLenPrefix || size == 0) return 0;
@@ -104,7 +104,7 @@ size_t packetizeFrame(uint32_t frameId, int64_t captureUs, bool keyframe, uint8_
         h.index = uint16_t(i);
         h.write(buf);
         std::memcpy(buf + FragmentHeader::kSize, data + off, n);
-        emit(buf, FragmentHeader::kSize + n);
+        sendFragment(buf, FragmentHeader::kSize + n);
         off += n;
     }
 
@@ -129,7 +129,7 @@ size_t packetizeFrame(uint32_t frameId, int64_t captureUs, bool keyframe, uint8_
                 h.index = uint16_t(int(count) + b * h.fecParity + j);
                 h.write(buf);
                 std::memcpy(buf + FragmentHeader::kSize, parity[size_t(j)].data(), symLen);
-                emit(buf, FragmentHeader::kSize + symLen);
+                sendFragment(buf, FragmentHeader::kSize + symLen);
             }
         }
     }

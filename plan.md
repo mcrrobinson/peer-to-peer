@@ -171,6 +171,13 @@ Congestion control (phase 6), in `MediaTransport` because it sees every packet:
       falls back to read-back + upload (non-GL backend, import failure); `--decode-output cpu`
       for A/B. Self view uses the same import. Same sitting, camera → instance 2's screen:
       decode 8.0 → 2.9 ms, capture→swap 40.4 → 33.4 ms.
+      test_call flake (burst loss, ~1 in 15 suites): all 3 NACKs went out within ~10 ms and a
+      loss burst took the resends too, then the frame timed out at 20 ms. The receiver now keeps
+      asking until the (unchanged) grace deadline, ≥ 3 tries, retry ≥ 3 ms: 0/20 suite failures
+      (burst test lost 0 in 20/20, was 5/20 with ≥ 1). Network scenarios (MB/MD/MG600L2): resend
+      volume and queueing unchanged; MD timeouts → PLI 2,2,2 → 0,0,0. Also renamed the
+      packetizer's `emit` parameter: Qt's empty `emit` macro silently dropped every send once a Qt
+      header got included there.
 - [ ] **10 macOS** — AVFoundation camera, ScreenCaptureKit, VideoToolbox (low-latency RC, HEVC),
       CoreAudio via miniaudio, codesign + camera/mic/screen entitlements. Platform splits exist
       (`camera_none.cpp`, `codec_probe_generic.cpp`, `audio_device_none.cpp`).

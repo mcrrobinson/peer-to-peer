@@ -517,7 +517,14 @@ void VideoReceiveStream::decodeLoop()
         // the control channel's: a resend can't come back sooner than that.
         const int64_t rtt = std::max<int64_t>({rttUs_.load(), transport_.ccStats().srttUs, 0});
         FrameAssembler::NackPolicy policy;
-        policy.retryUs = std::max<int64_t>(5'000, rtt * 3 / 2 + 2'000);
+        policy.retryUs = std::max<int64_t>(3'000, rtt * 3 / 2 + 2'000);
+        // How long a hole may hold up decoding (unchanged by the retries
+        // below): room for three requests, at least 20 ms.
+        const int64_t nackGrace =
+            std::clamp<int64_t>(policy.reorderUs + 3 * policy.retryUs + rtt / 2, 20'000, 300'000);
+        // Keep asking until then: a loss burst can take the first few resends
+        // too, and giving up early costs a keyframe. (Slow links: still 3.)
+        policy.maxTries = std::max(3, int((nackGrace - policy.reorderUs) / policy.retryUs));
         {
             std::unique_lock l(m_);
             // Short timeout: the NACK and grace timers run off this loop.
@@ -525,9 +532,7 @@ void VideoReceiveStream::decodeLoop()
             wake_ = false;
             const int64_t now = nowUs();
             if (nack_) {
-                // Long enough for every retry to come back, but bounded.
-                assembler_.setReorderGraceUs(std::clamp<int64_t>(
-                    policy.reorderUs + policy.maxTries * policy.retryUs + rtt / 2, 20'000, 300'000));
+                assembler_.setReorderGraceUs(nackGrace);
                 nacks = assembler_.collectNacks(now, policy);
             }
             frames = assembler_.poll(now);

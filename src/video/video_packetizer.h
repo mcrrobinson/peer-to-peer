@@ -63,12 +63,12 @@ struct PacketizeOptions {
     int64_t encodedUs = 0; // when the encoder produced the frame (0 = unknown), sender clock
 };
 
-// Calls |emit| once per fragment with a complete payload (header + data):
+// Calls |sendFragment| once per fragment with a complete payload (header + data):
 // data fragments first, then parity. Returns the number of data
 // fragments, or 0 if the frame is too large.
 size_t packetizeFrame(uint32_t frameId, int64_t captureUs, bool keyframe, uint8_t codec, const uint8_t* data,
                       size_t size, size_t maxPayload,
-                      const std::function<void(const uint8_t* payload, size_t len)>& emit,
+                      const std::function<void(const uint8_t* payload, size_t len)>& sendFragment,
                       const PacketizeOptions& opt = {});
 
 struct AssembledFrame {
