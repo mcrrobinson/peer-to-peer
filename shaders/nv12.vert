@@ -6,6 +6,8 @@ layout(location = 0) out vec2 v_uv;
 layout(std140, binding = 0) uniform Uniforms {
     mat4 mvp;
     vec4 params; // x: mirror horizontally
+    vec4 range;
+    vec4 matrix;
 };
 
 void main()

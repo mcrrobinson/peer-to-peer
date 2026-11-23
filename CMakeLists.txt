@@ -89,7 +89,7 @@ endif()
 if(CMAKE_SYSTEM_NAME STREQUAL "Linux")
     pkg_check_modules(LIBVA REQUIRED IMPORTED_TARGET libva libva-drm)
     pkg_check_modules(PIPEWIRE REQUIRED IMPORTED_TARGET libpipewire-0.3)
-    target_sources(p2pcore PRIVATE src/video/codec_probe_linux.cpp src/video/camera_v4l2.cpp src/video/jpeg_decode.cpp
+    target_sources(p2pcore PRIVATE src/video/codec_probe_linux.cpp src/video/camera_v4l2.cpp src/video/jpeg_decode.cpp src/video/vaapi_device.cpp
                                    src/video/screen_capture_pipewire.cpp)
     target_link_libraries(p2pcore PRIVATE PkgConfig::LIBVA PkgConfig::PIPEWIRE Qt6::DBus)
     # SPA's C headers use designated initialisers and casts g++ warns about.

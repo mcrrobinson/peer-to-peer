@@ -214,6 +214,7 @@ bool VideoSendStream::openEncoder(const Rung& r, int fps)
     ec.height = r.height;
     ec.fps = fps;
     ec.bitrateKbps = r.kbps;
+    ec.colour = encoderColour_;
     auto enc = std::make_unique<VideoEncoder>();
     QString err;
     if (!enc->init(ec, &err)) {
@@ -246,6 +247,7 @@ const VideoFrame* VideoSendStream::scaled(const VideoFrame& f, int w, int h)
     sws_scale(sws_, src, srcStride, 0, f.height, dst, dstStride);
     scaledFrame_.captureUs = f.captureUs;
     scaledFrame_.id = f.id;
+    scaledFrame_.colour = f.colour;
     return &scaledFrame_;
 }
 
@@ -310,11 +312,20 @@ void VideoSendStream::onFrame(std::shared_ptr<VideoFrame> f)
             return;
         }
     }
+    // The encoder signals the source's colours (camera MJPEG passes through
+    // in its own).
+    if (encoder_ && f->colour != encoderColour_) encoder_.reset();
+    encoderColour_ = f->colour;
     if (!encoder_ && !openEncoder(ladder_->rung(), fps)) {
         encoderFailed_ = true;
         return;
     }
-    const VideoFrame* in = scaled(*f, ladder_->rung().width, ladder_->rung().height);
+    const Rung rung = ladder_->rung();
+    // A GPU frame goes to a hardware encoder as is (scaled there, on the
+    // GPU); anything else is scaled here on the CPU.
+    const VideoFrame* in = f->gpu && encoder_->hardware() ? f.get()
+                         : f->ensureCpu()                 ? scaled(*f, rung.width, rung.height)
+                                                          : nullptr;
     if (!in) return;
 
     const bool key = forceKeyframe_.exchange(false);
@@ -331,8 +342,8 @@ void VideoSendStream::onFrame(std::shared_ptr<VideoFrame> f)
         PacketizeOptions opt;
         opt.encodedUs = encodedUs;
         opt.extraFlags = sendingPattern_ ? FragmentHeader::kTestPattern : 0;
-        opt.width = uint16_t(in->width);
-        opt.height = uint16_t(in->height);
+        opt.width = uint16_t(rung.width);
+        opt.height = uint16_t(rung.height);
         switch (cfg_.fec) {
         case VideoStreamConfig::Fec::Off: break;
         case VideoStreamConfig::Fec::Auto:

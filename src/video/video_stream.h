@@ -116,6 +116,7 @@ private:
     int ladderSrcW_ = 0, ladderSrcH_ = 0;
     std::unique_ptr<VideoEncoder> encoder_;
     bool encoderFailed_ = false;
+    Colour encoderColour_ = Colour::Bt709Limited;
     std::unique_ptr<RungSelector> ladder_;
     SwsContext* sws_ = nullptr;
     VideoFrame scaledFrame_;

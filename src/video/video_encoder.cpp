@@ -1,5 +1,9 @@
 #include "video/video_encoder.h"
 
+#ifndef __APPLE__
+#include "video/vaapi_device.h"
+#endif
+
 extern "C" {
 #include <libavcodec/avcodec.h>
 #include <libavutil/hwcontext.h>
@@ -58,6 +62,8 @@ struct VideoEncoder::Impl {
 VideoEncoder::VideoEncoder() : d(std::make_unique<Impl>()) {}
 VideoEncoder::~VideoEncoder() = default;
 
+bool VideoEncoder::hardware() const { return d->cfg.hardware; }
+
 QString VideoEncoder::name() const
 {
     return d->codec ? QString::fromLatin1(d->codec->name) : QStringLiteral("none");
@@ -85,17 +91,26 @@ bool VideoEncoder::init(const Config& cfg, QString* error)
     c->rc_max_rate = c->bit_rate;
     c->rc_buffer_size = int(c->bit_rate / cfg.fps); // ~1 frame VBV
     c->flags |= AV_CODEC_FLAG_LOW_DELAY;
-    c->color_primaries = AVCOL_PRI_BT709;
-    c->color_trc = AVCOL_TRC_BT709;
-    c->colorspace = AVCOL_SPC_BT709;
-    c->color_range = AVCOL_RANGE_MPEG;
+    if (cfg.colour == Colour::Bt601Full) { // camera MJPEG, passed through unconverted
+        c->color_primaries = AVCOL_PRI_SMPTE170M;
+        c->color_trc = AVCOL_TRC_SMPTE170M;
+        c->colorspace = AVCOL_SPC_SMPTE170M;
+        c->color_range = AVCOL_RANGE_JPEG;
+    } else {
+        c->color_primaries = AVCOL_PRI_BT709;
+        c->color_trc = AVCOL_TRC_BT709;
+        c->colorspace = AVCOL_SPC_BT709;
+        c->color_range = AVCOL_RANGE_MPEG;
+    }
 
     if (cfg.hardware) {
 #ifdef __APPLE__
         c->pix_fmt = AV_PIX_FMT_NV12;
 #else
-        int e = av_hwdevice_ctx_create(&d->device, AV_HWDEVICE_TYPE_VAAPI, nullptr, nullptr, 0);
-        if (e < 0) return fail(QStringLiteral("VA-API device"), e);
+        // The shared device: camera surfaces come in without a copy.
+        d->device = sharedVaapiDevice();
+        if (!d->device) return fail(QStringLiteral("VA-API device"));
+        int e = 0;
         d->frames = av_hwframe_ctx_alloc(d->device);
         auto* fc = reinterpret_cast<AVHWFramesContext*>(d->frames->data);
         fc->format = AV_PIX_FMT_VAAPI;
@@ -134,23 +149,38 @@ bool VideoEncoder::init(const Config& cfg, QString* error)
     if (!cfg.hardware && (e = av_frame_get_buffer(d->sw, 0)) < 0) return fail(QStringLiteral("frame alloc"), e);
     d->hw = av_frame_alloc();
     d->pkt = av_packet_alloc();
-    qCInfo(lcEnc).noquote() << QStringLiteral("encoder %1 %2x%3 @%4 fps %5 kbps CBR, VBV %6 kbit")
+    qCInfo(lcEnc).noquote() << QStringLiteral("encoder %1 %2x%3 @%4 fps %5 kbps CBR, VBV %6 kbit%7")
                                    .arg(QString::fromLatin1(name))
                                    .arg(cfg.width)
                                    .arg(cfg.height)
                                    .arg(cfg.fps)
                                    .arg(cfg.bitrateKbps)
-                                   .arg(c->rc_buffer_size / 1000);
+                                   .arg(c->rc_buffer_size / 1000)
+                                   .arg(cfg.colour == Colour::Bt601Full ? QStringLiteral(", BT.601 full range") : QString());
     return true;
 }
 
 bool VideoEncoder::encode(const VideoFrame& f, bool forceKeyframe, const Output& out)
 {
-    if (!d->ctx || f.width != d->cfg.width || f.height != d->cfg.height) return false;
+    if (!d->ctx) return false;
     AVFrame* input = nullptr;
     int e = 0;
+#ifndef __APPLE__
+    const bool zeroCopy = d->cfg.hardware && f.gpu;
+#else
+    const bool zeroCopy = false;
+#endif
+    if (!zeroCopy && (f.width != d->cfg.width || f.height != d->cfg.height || !f.ensureCpu())) return false;
 
-    if (d->cfg.hardware) {
+    if (zeroCopy) {
+        auto* s = static_cast<AVFrame*>(f.gpu->nv12Surface(d->cfg.width, d->cfg.height));
+        av_frame_unref(d->hw);
+        if (!s || (e = av_frame_ref(d->hw, s)) < 0) {
+            qCWarning(lcEnc) << "no GPU surface for the frame";
+            return false;
+        }
+        input = d->hw;
+    } else if (d->cfg.hardware) {
         // Wrap the NV12 buffer (no copy) and upload it to a GPU surface.
         d->sw->data[0] = const_cast<uint8_t*>(f.y());
         d->sw->data[1] = const_cast<uint8_t*>(f.uv());
@@ -186,7 +216,7 @@ bool VideoEncoder::encode(const VideoFrame& f, bool forceKeyframe, const Output&
     input->pts = f.captureUs;
     input->pict_type = forceKeyframe ? AV_PICTURE_TYPE_I : AV_PICTURE_TYPE_NONE;
     e = avcodec_send_frame(d->ctx, input);
-    if (d->cfg.hardware) {
+    if (d->cfg.hardware && !zeroCopy) {
         // The wrapper frame doesn't own its planes.
         d->sw->data[0] = d->sw->data[1] = nullptr;
     }

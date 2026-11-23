@@ -125,6 +125,10 @@ std::shared_ptr<VideoFrame> VideoDecoder::decode(const uint8_t* data, size_t siz
         if (displayW > 0 && displayW < w) w = displayW;
         if (displayH > 0 && displayH < h) h = displayH;
         f->allocate(w & ~1, h & ~1);
+        // Camera MJPEG is sent in its own colours (full-range BT.601).
+        const bool full = d->frame->color_range == AVCOL_RANGE_JPEG;
+        if (full && (d->frame->colorspace == AVCOL_SPC_SMPTE170M || d->frame->colorspace == AVCOL_SPC_BT470BG))
+            f->colour = Colour::Bt601Full;
         if (src->format == AV_PIX_FMT_NV12) {
             for (int r = 0; r < f->height; ++r)
                 std::memcpy(f->y() + size_t(r) * size_t(f->width), src->data[0] + r * src->linesize[0], size_t(f->width));
@@ -137,6 +141,9 @@ std::shared_ptr<VideoFrame> VideoDecoder::decode(const uint8_t* data, size_t siz
                 *error = true;
                 return nullptr;
             }
+            // Repack only: the renderer converts from the stream's colours.
+            const int* k = sws_getCoefficients(full ? SWS_CS_ITU601 : SWS_CS_ITU709);
+            sws_setColorspaceDetails(d->sws, k, full ? 1 : 0, k, full ? 1 : 0, 0, 1 << 16, 1 << 16);
             uint8_t* dst[2] = {f->y(), f->uv()};
             const int stride[2] = {f->width, f->width};
             sws_scale(d->sws, src->data, src->linesize, 0, f->height, dst, stride);

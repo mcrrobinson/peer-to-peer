@@ -154,8 +154,14 @@ Congestion control (phase 6), in `MediaTransport` because it sees every packet:
       software): decode 1 ms → VPP repack 4:2:2→NV12 4.5 ms → download 2.7 ms → CPU 601-full→709-
       limited pass 2.4 ms (Mesa VPP ignores colour properties for YUV→YUV). Convert 14.5 → 11 ms,
       CPU ~13 → ~3 ms/frame, so the capture thread keeps up: timestamp→dequeue 25 → 20 ms, camera
-      drops ~250 → ~5 per 25 s; sender capture→encoded 45 → 36–41 ms. Further gain needs the
-      zero-copy item (VA surface straight to the encoder, BT.601 full range signalled in the VUI).
+      drops ~250 → ~5 per 25 s; sender capture→encoded 45 → 36–41 ms.
+      Zero-copy camera done: JPEG decoded on the process-wide VA device (`vaapi_device.cpp`), frame
+      stays a VA surface (`VideoFrame::gpu`); the encoder takes an NV12 surface repacked/scaled by
+      VPP; self view downloads on the render thread only when drawn. Camera MJPEG is sent in its
+      own colours (BT.601 full, signalled in the VUI; `VideoFrame::colour`, shader matrix per frame),
+      so there is no CSC anywhere. Mesa's EFC shortcut (unscaled VPP → encoder reads the YUYV source
+      and garbles it) is switched off at start-up. Camera thread 10 → 1.1 ms/frame; capture→encoded
+      at the receiver 31.8 → 25.8 ms (same session, software decode vs zero-copy).
 - [ ] **10 macOS** — AVFoundation camera, ScreenCaptureKit, VideoToolbox (low-latency RC, HEVC),
       CoreAudio via miniaudio, codesign + camera/mic/screen entitlements. Platform splits exist
       (`camera_none.cpp`, `codec_probe_generic.cpp`, `audio_device_none.cpp`).

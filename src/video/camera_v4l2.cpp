@@ -212,7 +212,12 @@ private:
             if (!have) continue;
 
             auto frame = std::make_shared<VideoFrame>();
-            frame->allocate(width_, height_);
+            if (pixfmt_ == V4L2_PIX_FMT_NV12) {
+                frame->allocate(width_, height_);
+            } else { // the JPEG decoder fills CPU planes or attaches a GPU image
+                frame->width = width_;
+                frame->height = height_;
+            }
             frame->id = seq_++;
             const bool monotonic =
                 (last.flags & V4L2_BUF_FLAG_TIMESTAMP_MASK) == V4L2_BUF_FLAG_TIMESTAMP_MONOTONIC;
@@ -249,7 +254,7 @@ private:
             return true;
         }
 
-        // MJPEG -> limited-range BT.709 NV12. The hardware path gives up
+        // MJPEG -> NV12 in the JPEG's colours. The hardware path gives up
         // after repeated failures (a JPEG it can't take) and software
         // decoding takes over; a single bad frame from the camera is normal.
         if (jpeg_->decode(src, len, f)) {

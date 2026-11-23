@@ -8,6 +8,7 @@
 #include <rhi/qrhi.h>
 #include <rhi/qshader.h>
 
+#include <cstring>
 #include <memory>
 
 namespace p2p::app {
@@ -30,7 +31,22 @@ const float kQuad[] = {
 struct Uniforms {
     float mvp[16];
     float params[4]; // x: mirror
+    float range[4];  // YUV -> RGB: x luma offset, y luma scale, z chroma scale
+    float matrix[4]; // x Cr->R, y Cb->G, z Cr->G, w Cb->B
 };
+
+void setColour(Uniforms& u, video::Colour c)
+{
+    if (c == video::Colour::Bt601Full) {
+        const float r[4] = {0.f, 1.f, 1.f, 0.f}, m[4] = {1.402f, 0.344136f, 0.714136f, 1.772f};
+        std::memcpy(u.range, r, sizeof r);
+        std::memcpy(u.matrix, m, sizeof m);
+    } else { // BT.709 limited
+        const float r[4] = {16.f / 255.f, 255.f / 219.f, 255.f / 224.f, 0.f}, m[4] = {1.5748f, 0.1873f, 0.4681f, 1.8556f};
+        std::memcpy(u.range, r, sizeof r);
+        std::memcpy(u.matrix, m, sizeof m);
+    }
+}
 } // namespace
 
 class VideoRenderer : public QQuickRhiItemRenderer {
@@ -148,6 +164,8 @@ void VideoRenderer::render(QRhiCommandBuffer* cb)
     }
 
     ensureTextures(frame_->width, frame_->height);
+    // A GPU (camera) frame is downloaded here, only when it gets drawn.
+    if (frameDirty_ && !frame_->ensureCpu()) frameDirty_ = false;
     if (frameDirty_) {
         QRhiTextureSubresourceUploadDescription yDesc(frame_->y(), quint32(frame_->width * frame_->height));
         yDesc.setDataStride(quint32(frame_->width));
@@ -186,6 +204,7 @@ void VideoRenderer::render(QRhiCommandBuffer* cb)
     Uniforms uni{};
     std::memcpy(uni.mvp, mvp.constData(), sizeof(uni.mvp));
     uni.params[0] = mirrored_ ? 1.f : 0.f;
+    setColour(uni, frame_->colour);
     u->updateDynamicBuffer(ubuf_.get(), 0, sizeof(uni), &uni);
 
     cb->beginPass(renderTarget(), QColor(0, 0, 0), {1.0f, 0}, u);

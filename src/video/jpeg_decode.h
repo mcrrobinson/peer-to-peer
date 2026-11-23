@@ -10,22 +10,25 @@
 
 namespace p2p::video {
 
-// Camera MJPEG -> NV12 (limited-range BT.709, what the encoder expects).
-// Webcam JPEGs are full-range BT.601, usually 4:2:2. Linux only for now.
+// Camera MJPEG -> NV12 in the JPEG's own colours (full-range BT.601,
+// Colour::Bt601Full): no colour conversion on the send path; the encoder
+// signals it and the receiver's renderer converts. Linux only for now.
 class JpegDecoder {
 public:
     virtual ~JpegDecoder() = default;
-    // |out| must already be allocated at the camera size.
+    // |out| comes with width / height set (the camera size); the decoder
+    // either fills its CPU planes or attaches a GPU image.
     virtual bool decode(const uint8_t* jpeg, size_t len, VideoFrame& out) = 0;
     virtual QString name() const = 0;
 };
 
-// libavcodec + swscale on the CPU (~13 ms CPU per 1080p frame here).
+// libavcodec on the CPU, repacked to NV12 with swscale.
 std::unique_ptr<JpegDecoder> createSoftwareJpegDecoder();
 
-// VA-API JPEG decode, VA video-processing repack to NV12, download, then the
-// range/matrix conversion on the CPU (Mesa's VPP ignores colour properties
-// for YUV -> YUV). nullptr, with |why| set, if the GPU can't do it.
+// VA-API JPEG decode on the process's shared VA device; frames stay on the
+// GPU (VideoFrame::gpu): the encoder takes an NV12 surface repacked and
+// scaled by VA video processing, CPU readers download on demand. nullptr,
+// with |why| set, if the GPU can't do it.
 std::unique_ptr<JpegDecoder> createVaapiJpegDecoder(QString* why);
 
 } // namespace p2p::video
