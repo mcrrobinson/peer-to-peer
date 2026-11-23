@@ -95,6 +95,7 @@ void TestPatternSource::render(VideoFrame& f, uint32_t frameNo)
 std::optional<uint32_t> TestPatternSource::readCode(const VideoFrame& f)
 {
     if (f.width < kMargin * 2 + kPitch * kCodeBits || f.height < kMargin + kBlock) return std::nullopt;
+    if (!f.ensureCpu()) return std::nullopt; // a GPU-decoded frame: read it back
     uint32_t v = 0;
     for (int b = 0; b < kCodeBits; ++b) {
         // Average the block centre to ride out compression noise.

@@ -5,7 +5,10 @@
 #include <QQuickWindow>
 
 #include <QFile>
+#include <QOpenGLContext>
+#include <QOpenGLFunctions>
 #include <rhi/qrhi.h>
+#include <rhi/qrhi_platform.h>
 #include <rhi/qshader.h>
 
 #include <cstring>
@@ -35,6 +38,91 @@ struct Uniforms {
     float matrix[4]; // x Cr->R, y Cb->G, z Cr->G, w Cb->B
 };
 
+// Showing GPU frames without a copy (OpenGL on EGL): dma-buf -> EGLImage ->
+// GL texture. The few EGL names needed (EGL_EXT_image_dma_buf_import,
+// EGL_EXT_image_dma_buf_import_modifiers, GL_OES_EGL_image), from the specs.
+using EGLint = int32_t;
+using EGLenum = unsigned int;
+using EGLBoolean = unsigned int;
+using EGLImage = void*;
+constexpr EGLint kEglNone = 0x3038, kEglWidth = 0x3057, kEglHeight = 0x3056;
+constexpr EGLenum kEglLinuxDmaBuf = 0x3270;
+constexpr EGLint kEglDrmFourcc = 0x3271, kEglPlane0Fd = 0x3272, kEglPlane0Offset = 0x3273,
+                 kEglPlane0Pitch = 0x3274, kEglPlane0ModLo = 0x3443, kEglPlane0ModHi = 0x3444;
+constexpr uint64_t kDrmModInvalid = 0x00ffffffffffffffULL;
+using CreateImageFn = EGLImage (*)(EGLDisplay, EGLContext, EGLenum, void*, const EGLint*);
+using DestroyImageFn = EGLBoolean (*)(EGLDisplay, EGLImage);
+using ImageTargetTextureFn = void (*)(GLenum, void*);
+
+class DmaBufImporter {
+public:
+    // From the renderer's GL context (current); false if not EGL / no extensions.
+    bool init(QOpenGLContext* ctx)
+    {
+        auto* egl = ctx ? ctx->nativeInterface<QNativeInterface::QEGLContext>() : nullptr;
+        if (!egl) return false;
+        display_ = egl->display();
+        create_ = reinterpret_cast<CreateImageFn>(ctx->getProcAddress("eglCreateImageKHR"));
+        destroy_ = reinterpret_cast<DestroyImageFn>(ctx->getProcAddress("eglDestroyImageKHR"));
+        target_ = reinterpret_cast<ImageTargetTextureFn>(ctx->getProcAddress("glEGLImageTargetTexture2DOES"));
+        gl_ = ctx->functions();
+        getError_ = reinterpret_cast<EGLint (*)()>(ctx->getProcAddress("eglGetError"));
+        return display_ && create_ && destroy_ && target_ && gl_;
+    }
+    // (Re)points tex[0] / tex[1] at the frame's Y / UV planes.
+    bool import(const video::DmaBufNv12& d, GLuint tex[2])
+    {
+        if (!tex[0]) gl_->glGenTextures(2, tex);
+        const video::DmaBufPlane* planes[2] = {&d.y, &d.uv};
+        for (int i = 0; i < 2; ++i) {
+            const auto& p = *planes[i];
+            const int div = i ? 2 : 1;
+            std::vector<EGLint> a = {kEglWidth,        d.width / div,    kEglHeight,      d.height / div,
+                                     kEglDrmFourcc,    EGLint(p.drmFormat), kEglPlane0Fd,  p.fd,
+                                     kEglPlane0Offset, EGLint(p.offset), kEglPlane0Pitch, EGLint(p.pitch)};
+            if (p.modifier != kDrmModInvalid) {
+                a.insert(a.end(), {kEglPlane0ModLo, EGLint(p.modifier & 0xffffffff), kEglPlane0ModHi,
+                                   EGLint(p.modifier >> 32)});
+            }
+            a.push_back(kEglNone);
+            EGLImage img = create_(display_, nullptr, kEglLinuxDmaBuf, nullptr, a.data());
+            if (!img) {
+                error_ = QStringLiteral("eglCreateImage plane %1 (fourcc %2, modifier %3): EGL error 0x%4")
+                             .arg(i)
+                             .arg(p.drmFormat, 0, 16)
+                             .arg(p.modifier, 0, 16)
+                             .arg(getError_ ? getError_() : 0, 0, 16);
+                return false;
+            }
+            while (gl_->glGetError() != GL_NO_ERROR) {} // not ours
+            gl_->glBindTexture(GL_TEXTURE_2D, tex[i]);
+            target_(GL_TEXTURE_2D, img);
+            const GLenum err = gl_->glGetError();
+            const bool ok = err == GL_NO_ERROR;
+            if (!ok) error_ = QStringLiteral("glEGLImageTargetTexture2DOES plane %1: GL error 0x%2").arg(i).arg(err, 0, 16);
+            gl_->glBindTexture(GL_TEXTURE_2D, 0);
+            destroy_(display_, img); // the texture keeps the buffer
+            if (!ok) return false;
+        }
+        return true;
+    }
+    QString error() const { return error_; }
+    void release(GLuint tex[2])
+    {
+        if (gl_ && tex[0]) gl_->glDeleteTextures(2, tex);
+        tex[0] = tex[1] = 0;
+    }
+
+private:
+    EGLDisplay display_ = nullptr;
+    CreateImageFn create_ = nullptr;
+    DestroyImageFn destroy_ = nullptr;
+    ImageTargetTextureFn target_ = nullptr;
+    QOpenGLFunctions* gl_ = nullptr;
+    EGLint (*getError_)() = nullptr;
+    QString error_;
+};
+
 void setColour(Uniforms& u, video::Colour c)
 {
     if (c == video::Colour::Bt601Full) {
@@ -51,18 +139,31 @@ void setColour(Uniforms& u, video::Colour c)
 
 class VideoRenderer : public QQuickRhiItemRenderer {
 public:
-    ~VideoRenderer() override { QObject::disconnect(swapConn_); }
+    ~VideoRenderer() override
+    {
+        QObject::disconnect(swapConn_);
+        if (importOk_ && rhi_ && rhi_->makeThreadLocalNativeContextCurrent()) importer_.release(glTex_);
+    }
     void initialize(QRhiCommandBuffer*) override;
     void synchronize(QQuickRhiItem* item) override;
     void render(QRhiCommandBuffer* cb) override;
 
 private:
     void ensureTextures(int w, int h);
+    bool importFrame(); // frame_ straight from its dma-bufs; false: upload instead
+    void bindTextures(QRhiTexture* y, QRhiTexture* uv);
 
     QRhi* rhi_ = nullptr;
     std::unique_ptr<QRhiBuffer> vbuf_, ubuf_;
     std::unique_ptr<QRhiSampler> sampler_;
-    std::unique_ptr<QRhiTexture> yTex_, uvTex_;
+    std::unique_ptr<QRhiTexture> yTex_, uvTex_;    // uploaded frames
+    std::unique_ptr<QRhiTexture> extY_, extUV_;    // imported (zero-copy) frames, wrapping glTex_
+    GLuint glTex_[2] = {0, 0};
+    DmaBufImporter importer_;
+    bool importTried_ = false, importOk_ = false;
+    bool showingImported_ = false;
+    QRhiTexture* boundY_ = nullptr;
+    video::VideoFramePtr prevFrame_; // its buffers may still be read by the GPU
     std::unique_ptr<QRhiShaderResourceBindings> srb_;
     std::unique_ptr<QRhiGraphicsPipeline> ps_;
     QRhiRenderPassDescriptor* rpDesc_ = nullptr;
@@ -89,6 +190,11 @@ void VideoRenderer::initialize(QRhiCommandBuffer*)
         srb_.reset();
         yTex_.reset();
         uvTex_.reset();
+        extY_.reset();
+        extUV_.reset();
+        glTex_[0] = glTex_[1] = 0; // went with the old context
+        importTried_ = importOk_ = showingImported_ = false;
+        boundY_ = nullptr;
         vbufUploaded_ = false;
         vbuf_.reset(rhi_->newBuffer(QRhiBuffer::Immutable, QRhiBuffer::VertexBuffer, sizeof(kQuad)));
         vbuf_->create();
@@ -112,16 +218,55 @@ void VideoRenderer::ensureTextures(int w, int h)
     uvTex_.reset(rhi_->newTexture(QRhiTexture::RG8, QSize(w / 2, h / 2)));
     yTex_->create();
     uvTex_->create();
+    boundY_ = nullptr;
+}
 
+bool VideoRenderer::importFrame()
+{
+    if (!importTried_) {
+        importTried_ = true;
+        if (rhi_->backend() == QRhi::OpenGLES2) {
+            auto* h = static_cast<const QRhiGles2NativeHandles*>(rhi_->nativeHandles());
+            importOk_ = h && rhi_->makeThreadLocalNativeContextCurrent() && importer_.init(h->context);
+        }
+        qInfo("video view: %s", importOk_ ? "GPU frames shown without a copy (dma-buf -> EGLImage)"
+                                          : "GPU frames are read back and uploaded (no EGL dma-buf import)");
+    }
+    if (!importOk_ || !frame_->gpu) return false;
+    const video::DmaBufNv12* d = frame_->gpu->dmaBuf();
+    if (!d || !rhi_->makeThreadLocalNativeContextCurrent() || !importer_.import(*d, glTex_)) {
+        static bool warned = false;
+        if (!warned)
+            qWarning("video view: dma-buf import failed (%s); uploading instead",
+                     d ? qPrintable(importer_.error()) : "export");
+        warned = true;
+        return false;
+    }
+    const QSize size(frame_->width, frame_->height);
+    if (!extY_ || extY_->pixelSize() != size) {
+        extY_.reset(rhi_->newTexture(QRhiTexture::R8, size));
+        extUV_.reset(rhi_->newTexture(QRhiTexture::RG8, size / 2));
+        if (!extY_->createFrom({glTex_[0], 0}) || !extUV_->createFrom({glTex_[1], 0})) {
+            extY_.reset();
+            extUV_.reset();
+            return false;
+        }
+        boundY_ = nullptr;
+    }
+    return true;
+}
+
+void VideoRenderer::bindTextures(QRhiTexture* y, QRhiTexture* uv)
+{
+    if (boundY_ == y && srb_) return;
+    boundY_ = y;
     srb_.reset(rhi_->newShaderResourceBindings());
     srb_->setBindings({
         QRhiShaderResourceBinding::uniformBuffer(0, QRhiShaderResourceBinding::VertexStage |
                                                         QRhiShaderResourceBinding::FragmentStage,
                                                  ubuf_.get()),
-        QRhiShaderResourceBinding::sampledTexture(1, QRhiShaderResourceBinding::FragmentStage, yTex_.get(),
-                                                  sampler_.get()),
-        QRhiShaderResourceBinding::sampledTexture(2, QRhiShaderResourceBinding::FragmentStage, uvTex_.get(),
-                                                  sampler_.get()),
+        QRhiShaderResourceBinding::sampledTexture(1, QRhiShaderResourceBinding::FragmentStage, y, sampler_.get()),
+        QRhiShaderResourceBinding::sampledTexture(2, QRhiShaderResourceBinding::FragmentStage, uv, sampler_.get()),
     });
     srb_->create();
     ps_.reset();
@@ -143,6 +288,7 @@ void VideoRenderer::synchronize(QQuickRhiItem* item)
     auto f = video::FrameHub::instance().latest(stream_, &gen);
     if (gen != generation_) {
         generation_ = gen;
+        if (frameDirty_ == false && frame_) prevFrame_ = frame_; // shown last; GPU may still read it
         frame_ = std::move(f);
         frameDirty_ = frame_ != nullptr;
     }
@@ -163,9 +309,18 @@ void VideoRenderer::render(QRhiCommandBuffer* cb)
         return;
     }
 
-    ensureTextures(frame_->width, frame_->height);
-    // A GPU (camera) frame is downloaded here, only when it gets drawn.
-    if (frameDirty_ && !frame_->ensureCpu()) frameDirty_ = false;
+    if (frameDirty_) {
+        // A GPU frame is shown straight from its buffers; otherwise (or if
+        // that fails) uploaded, downloading a GPU frame first.
+        showingImported_ = importFrame();
+        if (showingImported_) {
+            frameDirty_ = false;
+            drawnGeneration_ = generation_;
+        } else if (!frame_->ensureCpu()) {
+            frameDirty_ = false;
+        }
+    }
+    if (!showingImported_) ensureTextures(frame_->width, frame_->height);
     if (frameDirty_) {
         QRhiTextureSubresourceUploadDescription yDesc(frame_->y(), quint32(frame_->width * frame_->height));
         yDesc.setDataStride(quint32(frame_->width));
@@ -176,6 +331,8 @@ void VideoRenderer::render(QRhiCommandBuffer* cb)
         frameDirty_ = false;
         drawnGeneration_ = generation_;
     }
+    if (showingImported_) bindTextures(extY_.get(), extUV_.get());
+    else bindTextures(yTex_.get(), uvTex_.get());
 
     if (!ps_) {
         ps_.reset(rhi_->newGraphicsPipeline());

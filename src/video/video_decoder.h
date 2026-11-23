@@ -10,8 +10,8 @@
 namespace p2p::video {
 
 // Low-delay decoder over FFmpeg: VA-API hwaccel for HEVC/AV1 when available
-// (frames are read back to NV12 for now; zero-copy import is phase 9),
-// otherwise the software hevc / libdav1d decoders with slice threading
+// (frames stay on the GPU: VideoFrame::gpu, shown without a copy, read back
+// only for CPU readers), otherwise the software hevc / libdav1d decoders with slice threading
 // only (frame threading would add a frame of delay per thread).
 class VideoDecoder {
 public:
@@ -29,6 +29,9 @@ public:
                                        int displayH = 0);
     bool hardware() const;
     QString name() const;
+    // Process-wide: hardware-decoded frames stay on the GPU (default) or are
+    // read back to the CPU at once (--decode-output cpu, for comparison).
+    static void setGpuFrames(bool on);
 
 private:
     struct Impl;

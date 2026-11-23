@@ -78,6 +78,10 @@ struct Diff {
 Diff compare(const VideoFrame& a, const VideoFrame& b)
 {
     Diff d;
+    if (!a.ensureCpu() || !b.ensureCpu()) {
+        d.madY = d.madC = d.maxD = 1e9;
+        return d;
+    }
     const size_t ny = size_t(a.width) * size_t(a.height), n = ny * 3 / 2;
     for (size_t i = 0; i < n; ++i) {
         const double x = std::abs(int(a.data[i]) - int(b.data[i]));
@@ -148,6 +152,15 @@ private slots:
         QVERIFY(out);
         QCOMPARE(out->width, w);
         QCOMPARE(out->colour, Colour::Bt601Full);
+        // Received frames stay on the GPU and export as the Y / UV dma-bufs
+        // the renderer imports (DRM R8 + GR88).
+        QVERIFY(out->gpu);
+        const DmaBufNv12* dma = out->gpu->dmaBuf();
+        QVERIFY(dma);
+        QCOMPARE(dma->width, w);
+        QCOMPARE(dma->y.drmFormat, 0x20203852u);  // DRM_FORMAT_R8
+        QCOMPARE(dma->uv.drmFormat, 0x38385247u); // DRM_FORMAT_GR88
+        QVERIFY(dma->y.fd >= 0 && dma->uv.fd >= 0 && dma->y.pitch >= uint32_t(w));
 
         // Against the software decode at the same size.
         auto sw = createSoftwareJpegDecoder();

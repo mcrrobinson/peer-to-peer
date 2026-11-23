@@ -233,6 +233,7 @@ public:
     }
     ~VaapiImage() override
     {
+        closeDmaBuf(dmaBuf_);
         for (auto& [size, f] : nv12_) av_frame_free(&f);
         av_frame_free(&decoded_);
     }
@@ -240,12 +241,31 @@ public:
     void* nv12Surface(int w, int h) override
     {
         std::lock_guard l(m_);
+        return nv12Locked(w, h);
+    }
+
+    const DmaBufNv12* dmaBuf() override
+    {
+        std::lock_guard l(m_);
+        if (!exported_) {
+            exported_ = true;
+            AVFrame* f = nv12Locked(w_, h_);
+            haveDmaBuf_ = f && exportVaapiNv12(f, w_, h_, dmaBuf_);
+        }
+        return haveDmaBuf_ ? &dmaBuf_ : nullptr;
+    }
+
+private:
+    AVFrame* nv12Locked(int w, int h)
+    {
         auto it = nv12_.find({w, h});
         if (it != nv12_.end()) return it->second;
         AVFrame* f = proc_->toNv12(decoded_, w_, h_, w, h);
         if (f) nv12_.emplace(std::pair{w, h}, f);
         return f;
     }
+
+public:
 
     bool download(VideoFrame& f) override
     {
@@ -273,6 +293,8 @@ private:
     int w_, h_;
     std::mutex m_;
     std::map<std::pair<int, int>, AVFrame*> nv12_;
+    DmaBufNv12 dmaBuf_;
+    bool exported_ = false, haveDmaBuf_ = false;
 };
 
 AVPixelFormat pickVaapi(AVCodecContext*, const AVPixelFormat* f)

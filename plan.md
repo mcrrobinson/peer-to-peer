@@ -162,6 +162,15 @@ Congestion control (phase 6), in `MediaTransport` because it sees every packet:
       so there is no CSC anywhere. Mesa's EFC shortcut (unscaled VPP → encoder reads the YUYV source
       and garbles it) is switched off at start-up. Camera thread 10 → 1.1 ms/frame; capture→encoded
       at the receiver 31.8 → 25.8 ms (same session, software decode vs zero-copy).
+      Low-latency present: tried swap interval 0 (GNOME Wayland, Qt GL): no gain (decoded→swap
+      1.8 vs 1.9 ms, probe median 7.2 vs 6.8 ms); the redraw wait is already < 2 ms with one video
+      window. Dropped. The probe's absolute numbers depend on window placement (its own
+      paint→capture calibration); use it for same-sitting A/B only.
+      Receive-side zero-copy done: hardware-decoded frames stay VA surfaces, exported as dma-bufs
+      (Y R8 + UV GR88) and imported by the renderer as EGLImages bound to GL textures QRhi wraps;
+      falls back to read-back + upload (non-GL backend, import failure); `--decode-output cpu`
+      for A/B. Self view uses the same import. Same sitting, camera → instance 2's screen:
+      decode 8.0 → 2.9 ms, capture→swap 40.4 → 33.4 ms.
 - [ ] **10 macOS** — AVFoundation camera, ScreenCaptureKit, VideoToolbox (low-latency RC, HEVC),
       CoreAudio via miniaudio, codesign + camera/mic/screen entitlements. Platform splits exist
       (`camera_none.cpp`, `codec_probe_generic.cpp`, `audio_device_none.cpp`).

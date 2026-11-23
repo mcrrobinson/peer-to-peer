@@ -1,21 +1,85 @@
 #include "video/video_decoder.h"
 
+#ifndef __APPLE__
+#include "video/vaapi_device.h"
+#endif
+
 extern "C" {
 #include <libavcodec/avcodec.h>
 #include <libavutil/hwcontext.h>
 #include <libavutil/opt.h>
+#ifndef __APPLE__
+#include <libavutil/hwcontext_vaapi.h>
+#endif
 #include <libswscale/swscale.h>
 }
 
 #include <QLoggingCategory>
 
+#include <atomic>
 #include <cstring>
+#include <mutex>
 
 Q_LOGGING_CATEGORY(lcDec, "p2p.decoder")
 
 namespace p2p::video {
 
 namespace {
+std::atomic<bool> gGpuFrames{true};
+
+#ifndef __APPLE__
+// A hardware-decoded frame kept on the GPU.
+class DecodedImage : public GpuImage {
+public:
+    explicit DecodedImage(AVFrame* f) : frame_(f) {}
+    ~DecodedImage() override
+    {
+        closeDmaBuf(dmaBuf_);
+        av_frame_free(&frame_);
+    }
+    void* nv12Surface(int w, int h) override
+    {
+        return w == frame_->width && h == frame_->height ? frame_ : nullptr;
+    }
+    bool download(VideoFrame& f) override
+    {
+        AVFrame* sw = av_frame_alloc();
+        if (!sw) return false;
+        sw->format = AV_PIX_FMT_NV12;
+        const bool ok = av_hwframe_transfer_data(sw, frame_, 0) >= 0;
+        if (ok) {
+            for (int r = 0; r < f.height; ++r)
+                std::memcpy(f.y() + size_t(r) * size_t(f.width), sw->data[0] + r * sw->linesize[0], size_t(f.width));
+            for (int r = 0; r < f.height / 2; ++r)
+                std::memcpy(f.uv() + size_t(r) * size_t(f.width), sw->data[1] + r * sw->linesize[1], size_t(f.width));
+        }
+        av_frame_free(&sw);
+        return ok;
+    }
+    const DmaBufNv12* dmaBuf() override
+    {
+        std::lock_guard l(m_);
+        if (!exported_) {
+            exported_ = true;
+            have_ = exportVaapiNv12(frame_, w_, h_, dmaBuf_);
+        }
+        return have_ ? &dmaBuf_ : nullptr;
+    }
+    void setSize(int w, int h)
+    {
+        w_ = w;
+        h_ = h;
+    }
+
+private:
+    AVFrame* frame_;
+    int w_ = 0, h_ = 0;
+    std::mutex m_;
+    DmaBufNv12 dmaBuf_;
+    bool exported_ = false, have_ = false;
+};
+#endif
+
 AVPixelFormat pickVaapi(AVCodecContext*, const AVPixelFormat* fmts)
 {
     for (const AVPixelFormat* p = fmts; *p != AV_PIX_FMT_NONE; ++p)
@@ -49,6 +113,7 @@ VideoDecoder::VideoDecoder() : d(std::make_unique<Impl>()) {}
 VideoDecoder::~VideoDecoder() = default;
 
 bool VideoDecoder::hardware() const { return d->hw; }
+void VideoDecoder::setGpuFrames(bool on) { gGpuFrames = on; }
 QString VideoDecoder::name() const
 {
     return d->codec ? QString::fromLatin1(d->codec->name) + (d->hw ? QStringLiteral(" (vaapi)") : QString())
@@ -72,6 +137,9 @@ bool VideoDecoder::init(media::Codec codec, bool preferHardware, QString* error)
     if (preferHardware && av_hwdevice_ctx_create(&d->device, AV_HWDEVICE_TYPE_VAAPI, nullptr, nullptr, 0) == 0) {
         c->hw_device_ctx = av_buffer_ref(d->device);
         c->get_format = pickVaapi;
+        // Frames held downstream (latest in the hub, the one on screen, the
+        // one before it) must not starve the decoder's surface pool.
+        c->extra_hw_frames = 4;
         d->hw = true;
     }
 #endif
@@ -108,6 +176,35 @@ std::shared_ptr<VideoFrame> VideoDecoder::decode(const uint8_t* data, size_t siz
     std::shared_ptr<VideoFrame> out;
     while (avcodec_receive_frame(d->ctx, d->frame) == 0) {
         AVFrame* src = d->frame;
+        // Display size comes from the decoded frame; a VAAPI surface is
+        // padded (e.g. 1088 lines) and the bitstream doesn't say by how much.
+        int w = d->frame->width, h = d->frame->height;
+        if (displayW > 0 && displayW < w) w = displayW;
+        if (displayH > 0 && displayH < h) h = displayH;
+        const bool full = d->frame->color_range == AVCOL_RANGE_JPEG;
+        const Colour colour =
+            full && (d->frame->colorspace == AVCOL_SPC_SMPTE170M || d->frame->colorspace == AVCOL_SPC_BT470BG)
+                ? Colour::Bt601Full
+                : Colour::Bt709Limited;
+#ifndef __APPLE__
+        if (d->frame->format == AV_PIX_FMT_VAAPI && gGpuFrames) {
+            // Keep it on the GPU; wait for the decode so the stage timing
+            // (and anyone mapping it) sees a finished picture.
+            auto* fc = reinterpret_cast<AVHWFramesContext*>(d->frame->hw_frames_ctx->data);
+            vaSyncSurface(static_cast<AVVAAPIDeviceContext*>(fc->device_ctx->hwctx)->display,
+                          VASurfaceID(uintptr_t(d->frame->data[3])));
+            auto f = std::make_shared<VideoFrame>();
+            f->width = w & ~1;
+            f->height = h & ~1;
+            f->colour = colour;
+            auto img = std::make_shared<DecodedImage>(av_frame_clone(d->frame));
+            img->setSize(f->width, f->height);
+            f->gpu = std::move(img);
+            out = std::move(f);
+            av_frame_unref(d->frame);
+            continue;
+        }
+#endif
         if (d->frame->format == AV_PIX_FMT_VAAPI) {
             av_frame_unref(d->swFrame);
             d->swFrame->format = AV_PIX_FMT_NV12;
@@ -119,16 +216,8 @@ std::shared_ptr<VideoFrame> VideoDecoder::decode(const uint8_t* data, size_t siz
             src = d->swFrame;
         }
         auto f = std::make_shared<VideoFrame>();
-        // Display size comes from the decoded frame; a VAAPI read-back is
-        // the whole (padded, e.g. 1088-line) surface.
-        int w = d->frame->width, h = d->frame->height;
-        if (displayW > 0 && displayW < w) w = displayW;
-        if (displayH > 0 && displayH < h) h = displayH;
         f->allocate(w & ~1, h & ~1);
-        // Camera MJPEG is sent in its own colours (full-range BT.601).
-        const bool full = d->frame->color_range == AVCOL_RANGE_JPEG;
-        if (full && (d->frame->colorspace == AVCOL_SPC_SMPTE170M || d->frame->colorspace == AVCOL_SPC_BT470BG))
-            f->colour = Colour::Bt601Full;
+        f->colour = colour; // camera MJPEG is sent in its own colours (full-range BT.601)
         if (src->format == AV_PIX_FMT_NV12) {
             for (int r = 0; r < f->height; ++r)
                 std::memcpy(f->y() + size_t(r) * size_t(f->width), src->data[0] + r * src->linesize[0], size_t(f->width));

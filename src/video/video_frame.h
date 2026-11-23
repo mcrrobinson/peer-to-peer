@@ -16,6 +16,19 @@ namespace p2p::video {
 
 struct VideoFrame;
 
+// An NV12 picture as two dma-buf planes (Y as DRM R8, UV as DRM GR88), for
+// showing a GPU frame without a copy. The fds belong to the GpuImage.
+struct DmaBufPlane {
+    int fd = -1;
+    uint32_t offset = 0, pitch = 0;
+    uint32_t drmFormat = 0;
+    uint64_t modifier = 0;
+};
+struct DmaBufNv12 {
+    int width = 0, height = 0; // the picture (the buffer may be padded)
+    DmaBufPlane y, uv;
+};
+
 // Colours of a frame's YUV: what the encoder signals in the bitstream and
 // the renderer converts from. Camera MJPEG stays in the JPEG's own colours
 // (no conversion on the send path); everything else is BT.709 limited.
@@ -32,6 +45,9 @@ public:
     virtual void* nv12Surface(int w, int h) = 0;
     // Fills |f|'s CPU planes (f.width x f.height); called once, under ensureCpu.
     virtual bool download(VideoFrame& f) = 0;
+    // The picture (at its own size) as dma-bufs, exported once and kept
+    // while the image lives; nullptr if not possible. Thread-safe.
+    virtual const DmaBufNv12* dmaBuf() { return nullptr; }
 
 private:
     friend struct VideoFrame;
