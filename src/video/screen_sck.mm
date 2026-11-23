@@ -209,8 +209,9 @@ private:
             p.active = YES;
             [p present];
         };
-        if ([NSThread isMainThread]) show();
-        else dispatch_async(dispatch_get_main_queue(), show);
+        // Always queued: presented before the app has finished launching (a
+        // source started before the event loop runs) the picker never shows.
+        dispatch_async(dispatch_get_main_queue(), show);
         qCInfo(lcScreenMac) << "screen: waiting for the picker";
     }
 

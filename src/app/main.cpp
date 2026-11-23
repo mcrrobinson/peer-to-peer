@@ -12,6 +12,7 @@
 #include <QGuiApplication>
 #include <QHostInfo>
 #include <QQmlApplicationEngine>
+#include <QWindow>
 #include <QQmlContext>
 #include <QTimer>
 
@@ -121,6 +122,9 @@ int main(int argc, char** argv)
     cli.addOptions({videoSourceOpt, cameraOpt, videoSizeOpt, videoFpsOpt, videoBitrateOpt, cameraFormatOpt, cameraDecodeOpt, decodeOutputOpt, encoderOpt, fecOpt,
                     noNackOpt, simBurstOpt, audioFecOpt, ccOpt, minBitrateOpt, simRateOpt, simDelayOpt, simQueueOpt,
                     simCeOpt, flashLogOpt, shareScreenOpt, screenSourceOpt, screenBitrateOpt});
+    // Testing: tools/latency_probe needs the call's video in view.
+    QCommandLineOption onTopOpt("on-top", "Keep the window above other windows (latency measurements).");
+    cli.addOption(onTopOpt);
     cli.process(*app);
 
     if (!p2p::crypto::init()) {
@@ -308,6 +312,12 @@ int main(int argc, char** argv)
         QObject::connect(engine.get(), &QQmlApplicationEngine::objectCreationFailed, app.get(),
                          [] { QCoreApplication::exit(1); }, Qt::QueuedConnection);
         engine->loadFromModule("P2PCall", "Main");
+        if (cli.isSet(onTopOpt))
+            for (QObject* o : engine->rootObjects())
+                if (auto* w = qobject_cast<QWindow*>(o)) {
+                    w->setFlag(Qt::WindowStaysOnTopHint, true);
+                    w->show(); // new flags on a shown window hide it (macOS)
+                }
     }
 
     return app->exec();

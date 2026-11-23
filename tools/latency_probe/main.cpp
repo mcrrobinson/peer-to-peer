@@ -1,8 +1,9 @@
 // Glass-to-glass latency probe.
 //
 // A window flashes black / white at random intervals. Point a call's camera
-// at it. The probe captures the whole screen (xdg-desktop-portal +
-// PipeWire, like screen share), splits each capture into tiles and finds
+// at it (a built-in laptop camera: through a mirror). The probe captures
+// the whole screen (Linux: xdg-desktop-portal + PipeWire; macOS:
+// ScreenCaptureKit -- like screen share), splits each capture into tiles and finds
 // every tile that follows the flashes: the probe window itself, and the
 // flash as it reappears in video windows (the remote view of the call, a
 // self view). Both are read from the same screen captures, so display,
@@ -287,7 +288,11 @@ int main(int argc, char** argv)
     flashOnlyOpt.setFlags(QCommandLineOption::HiddenFromHelp);
     QCommandLineOption selfTestOpt("self-test", "Check the analysis on synthetic captures (no window, no capture).");
     selfTestOpt.setFlags(QCommandLineOption::HiddenFromHelp);
-    cli.addOptions({secondsOpt, csvOpt, selfTestOpt, flashOnlyOpt, sourceLogOpt});
+    QCommandLineOption dumpOpt("dump",
+                               "Also save the raw measurements (flash times, per-tile luma of every capture) to this "
+                               "file, for analysing a run that found nothing.",
+                               "file");
+    cli.addOptions({secondsOpt, csvOpt, selfTestOpt, flashOnlyOpt, sourceLogOpt, dumpOpt});
     cli.process(app);
 
     if (cli.isSet(selfTestOpt)) {
@@ -403,6 +408,22 @@ int main(int argc, char** argv)
         std::lock_guard l(m);
         std::printf("\n%zu captures, %zu flashes (%d requested), %dx%d tiles\n", caps.size(), toggles.size(), ticks,
                     cols, rows);
+        if (cli.isSet(dumpOpt)) {
+            // "P2PD", cols, rows, flash count, capture count (int32); flashes
+            // (int64 us, int32 white); captures (int64 us, cols*rows luma bytes).
+            QFile d(cli.value(dumpOpt));
+            if (d.open(QIODevice::WriteOnly | QIODevice::Truncate)) {
+                auto put = [&](const auto& v) { d.write(reinterpret_cast<const char*>(&v), sizeof(v)); };
+                d.write("P2PD", 4);
+                put(int32_t(cols)), put(int32_t(rows)), put(int32_t(toggles.size())), put(int32_t(caps.size()));
+                for (const auto& g : toggles) put(int64_t(g.t)), put(int32_t(g.white));
+                for (const auto& c : caps) {
+                    put(int64_t(c.t));
+                    d.write(reinterpret_cast<const char*>(c.tiles.data()), qint64(c.tiles.size()));
+                }
+                std::printf("raw measurements in %s\n", qPrintable(d.fileName()));
+            }
+        }
         if (caps.size() < 100 || toggles.size() < 10) {
             std::printf("not enough data\n");
             app.exit(1);
@@ -488,6 +509,7 @@ int main(int argc, char** argv)
     const bool ok = source->start(
         [&](std::shared_ptr<video::VideoFrame> f) {
             if (f->repeated) return; // unchanged screen re-sent with a new timestamp
+            if (!f->ensureCpu()) return; // macOS captures are GPU frames: read back once
             Capture c;
             c.t = f->captureUs;
             const int cw = f->width / kTile, ch = f->height / kTile;
@@ -523,7 +545,18 @@ int main(int argc, char** argv)
         std::fprintf(stderr, "screen capture failed: %s\n", qPrintable(err));
         return 1;
     }
+    QTimer::singleShot(120'000, &app, [&] {
+        std::lock_guard l(m);
+        if (started) return;
+        std::fprintf(stderr, "no screen capture after 2 minutes (nothing picked?)\n");
+        app.exit(1);
+    });
+#ifdef Q_OS_MACOS
+    std::printf("pick the whole display in the screen-sharing picker (not a window: the probe and the call's "
+                "windows must both be in the capture)\n");
+#else
     std::printf("pick the screen to capture in the dialog (the whole monitor showing the probe and the call)\n");
+#endif
     std::fflush(stdout);
     return app.exec();
 }

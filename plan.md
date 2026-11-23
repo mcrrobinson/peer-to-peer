@@ -370,7 +370,15 @@ Congestion control (phase 6), in `MediaTransport` because it sees every packet:
             filters softer than a box (−1.7 dB at 1/2, −6 dB at 1/4 on a smooth picture vs box +
             CPU path; `DownsamplingMode` changes nothing). Tests: `test_camera_macos` (real camera,
             skips unless access already granted), `test_vt_encoder::takesGpuFrames`. 13/13 suites.
-            To do: glass-to-glass with `latency_probe` (needs the camera pointed at the screen).
+            Glass-to-glass (2026-11-23, `tools/latency_probe/mirror_macos.sh`: built-in camera
+            through a mirror at the probe window, 720p30, loopback, 84 flashes): call (remote view)
+            median 136 ms, p95 156; self view 125 / 139 ms. The call adds ~11 ms; our logs put
+            camera timestamp→screen at ~58 ms (self view), so ~65 ms is before the timestamp
+            (exposure, readout, Apple's ISP) -- outside our control. An echo region (camera also
+            sees the video window) at ~262 ms is the flash coming round twice: ignore. Needed on the
+            way: `p2pcall --on-top` (other windows covered the call windows), call windows big
+            enough for the video (side panel 300 + log 140 leave ~180×100 in 480×320), probe
+            `--dump` for offline analysis of a run that finds nothing.
       - [x] 4 ScreenCaptureKit (2026-11-23). `screen_sck.mm`: the system picker
             (SCContentSharingPicker: display, window or app) — no Screen Recording permission needed;
             `--screen-source display` captures the main display without it (needs the permission;
