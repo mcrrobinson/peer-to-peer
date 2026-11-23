@@ -1,11 +1,7 @@
 // V4L2 camera capture (Linux).
 #include "core/clock.h"
+#include "video/jpeg_decode.h"
 #include "video/video_source.h"
-
-extern "C" {
-#include <libavcodec/avcodec.h>
-#include <libswscale/swscale.h>
-}
 
 #include <QLoggingCategory>
 
@@ -77,7 +73,7 @@ public:
             .arg(cfg_.device, name_)
             .arg(width_)
             .arg(height_)
-            .arg(fourccName(pixfmt_))
+            .arg(fourccName(pixfmt_) + (pixfmt_ == V4L2_PIX_FMT_MJPEG ? (hwJpeg_ ? QStringLiteral(" (VA-API decode)") : QStringLiteral(" (software decode)")) : QString()))
             .arg(fps_);
     }
     int fps() const override { return fps_; }
@@ -168,13 +164,17 @@ private:
         if (xioctl(fd_, VIDIOC_STREAMON, &type) < 0) return fail(QStringLiteral("VIDIOC_STREAMON"));
 
         if (pixfmt_ == V4L2_PIX_FMT_MJPEG) {
-            const AVCodec* c = avcodec_find_decoder(AV_CODEC_ID_MJPEG);
-            jpeg_ = c ? avcodec_alloc_context3(c) : nullptr;
-            if (!jpeg_ || avcodec_open2(jpeg_, c, nullptr) < 0) {
+            QString why = QStringLiteral("software decode requested");
+            if (cfg_.hwJpegDecode) jpeg_ = createVaapiJpegDecoder(&why);
+            if (!jpeg_) {
+                if (cfg_.hwJpegDecode) qCInfo(lcCam).noquote() << "camera: no hardware MJPEG decode:" << why;
+                jpeg_ = createSoftwareJpegDecoder();
+            }
+            hwJpeg_ = jpeg_ && jpeg_->name() != QLatin1String("software");
+            if (!jpeg_) {
                 errno = EINVAL;
                 return fail(QStringLiteral("MJPEG decoder unavailable"));
             }
-            jpegFrame_ = av_frame_alloc();
         }
         qCInfo(lcCam).noquote() << "camera:" << description();
         return true;
@@ -186,10 +186,7 @@ private:
         buffers_.clear();
         if (fd_ >= 0) ::close(fd_);
         fd_ = -1;
-        if (sws_) sws_freeContext(sws_);
-        sws_ = nullptr;
-        av_frame_free(&jpegFrame_);
-        avcodec_free_context(&jpeg_);
+        jpeg_.reset();
     }
 
     void loop()
@@ -229,9 +226,9 @@ private:
             timingDeliver_ += double(t0 - frame->captureUs) / 1000.0;
             timingConvert_ += double(t1 - t0) / 1000.0;
             if (++timingN_ == 300) {
-                qCInfo(lcCam, "camera timing over %d frames: timestamp->dequeue %.1f ms, convert %.1f ms, dropped %llu",
+                qCInfo(lcCam, "camera timing over %d frames: timestamp->dequeue %.1f ms, convert %.1f ms (%s), dropped %llu",
                        timingN_, timingDeliver_ / timingN_, timingConvert_ / timingN_,
-                       (unsigned long long)dropped_);
+                       jpeg_ ? qPrintable(jpeg_->name()) : "raw", (unsigned long long)dropped_);
                 timingN_ = 0;
                 timingDeliver_ = timingConvert_ = 0;
             }
@@ -252,24 +249,22 @@ private:
             return true;
         }
 
-        // MJPEG: decode, then convert full-range BT.601 YUV 4:2:2 to limited BT.709 NV12.
-        AVPacket* pkt = av_packet_alloc();
-        pkt->data = const_cast<uint8_t*>(src);
-        pkt->size = int(len);
-        int rc = avcodec_send_packet(jpeg_, pkt);
-        av_packet_free(&pkt);
-        if (rc < 0 || avcodec_receive_frame(jpeg_, jpegFrame_) < 0) return false;
-
-        sws_ = sws_getCachedContext(sws_, jpegFrame_->width, jpegFrame_->height, AVPixelFormat(jpegFrame_->format),
-                                    width_, height_, AV_PIX_FMT_NV12, SWS_FAST_BILINEAR, nullptr, nullptr, nullptr);
-        if (!sws_) return false;
-        const int* src601 = sws_getCoefficients(SWS_CS_ITU601);
-        const int* dst709 = sws_getCoefficients(SWS_CS_ITU709);
-        sws_setColorspaceDetails(sws_, src601, 1 /*full*/, dst709, 0 /*limited*/, 0, 1 << 16, 1 << 16);
-        uint8_t* dst[2] = {f.y(), f.uv()};
-        const int dstStride[2] = {width_, width_};
-        sws_scale(sws_, jpegFrame_->data, jpegFrame_->linesize, 0, jpegFrame_->height, dst, dstStride);
-        return true;
+        // MJPEG -> limited-range BT.709 NV12. The hardware path gives up
+        // after repeated failures (a JPEG it can't take) and software
+        // decoding takes over; a single bad frame from the camera is normal.
+        if (jpeg_->decode(src, len, f)) {
+            jpegFailures_ = 0;
+            return true;
+        }
+        if (++jpegFailures_ >= 10 && jpeg_->name() != QLatin1String("software")) {
+            qCWarning(lcCam) << "camera: hardware MJPEG decode keeps failing, switching to software";
+            if (auto sw = createSoftwareJpegDecoder()) {
+                jpeg_ = std::move(sw);
+                hwJpeg_ = false;
+            }
+            jpegFailures_ = 0;
+        }
+        return false;
     }
 
     struct Mapped {
@@ -283,11 +278,11 @@ private:
     uint32_t pixfmt_ = 0;
     int width_ = 0, height_ = 0, stride_ = 0, fps_ = 0;
     std::vector<Mapped> buffers_;
-    AVCodecContext* jpeg_ = nullptr;
-    AVFrame* jpegFrame_ = nullptr;
+    std::unique_ptr<JpegDecoder> jpeg_;
+    int jpegFailures_ = 0;
+    std::atomic<bool> hwJpeg_{false};
     int timingN_ = 0;
     double timingDeliver_ = 0, timingConvert_ = 0;
-    SwsContext* sws_ = nullptr;
     Callback cb_;
     std::atomic<bool> running_{false};
     std::thread thread_;

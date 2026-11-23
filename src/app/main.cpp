@@ -76,6 +76,7 @@ int main(int argc, char** argv)
     QCommandLineOption videoBitrateOpt("video-bitrate", "Video bitrate in kbps (the maximum with --cc on).", "kbps",
                                        "12000");
     QCommandLineOption cameraFormatOpt("camera-format", "Camera format: auto, mjpeg or nv12.", "fmt", "auto");
+    QCommandLineOption cameraDecodeOpt("camera-decode", "Camera MJPEG decode: auto (hardware if available) or software.", "how", "auto");
     QCommandLineOption audioFecOpt("audio-fec", "Opus loss protection: lbrr (in-band FEC) or dred.", "mode",
                                    "lbrr");
     QCommandLineOption fecOpt("fec", "Video FEC: auto, off, or a fixed parity percentage.", "mode", "auto");
@@ -102,7 +103,7 @@ int main(int argc, char** argv)
                                        "portal");
     QCommandLineOption screenBitrateOpt("screen-bitrate", "Screen share bitrate in kbps (the maximum with --cc on).",
                                         "kbps", "10000");
-    cli.addOptions({videoSourceOpt, cameraOpt, videoSizeOpt, videoFpsOpt, videoBitrateOpt, cameraFormatOpt, fecOpt,
+    cli.addOptions({videoSourceOpt, cameraOpt, videoSizeOpt, videoFpsOpt, videoBitrateOpt, cameraFormatOpt, cameraDecodeOpt, fecOpt,
                     noNackOpt, simBurstOpt, audioFecOpt, ccOpt, minBitrateOpt, simRateOpt, simDelayOpt, simQueueOpt,
                     simCeOpt, flashLogOpt, shareScreenOpt, screenSourceOpt, screenBitrateOpt});
     cli.process(*app);
@@ -170,6 +171,7 @@ int main(int argc, char** argv)
     video.capture.format = cfmt == "mjpeg" ? p2p::video::CaptureConfig::Format::Mjpeg
                          : cfmt == "nv12"  ? p2p::video::CaptureConfig::Format::Nv12
                                            : p2p::video::CaptureConfig::Format::Auto;
+    video.capture.hwJpegDecode = cli.value(cameraDecodeOpt) != "software";
     video.bitrateKbps = std::clamp(cli.value(videoBitrateOpt).toInt(), 100, 200000);
     const QString fec = cli.value(fecOpt);
     if (fec == "auto") video.fec = p2p::video::VideoStreamConfig::Fec::Auto;

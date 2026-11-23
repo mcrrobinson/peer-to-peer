@@ -149,7 +149,13 @@ Congestion control (phase 6), in `MediaTransport` because it sees every packet:
       `latency_probe` (screen-capture glass-to-glass; `--source-log` with `--video-source flash`
       needs no camera). Measured 1080p60 loopback, flash source: created→on screen 26 ms median
       remote, 8 ms self view; after-swap cost ≈ one compositor frame. Camera: source stage 40 ms
-      (25.5 ms driver timestamp→dequeue, 14.6 ms software MJPEG decode) — next: VA-API JPEG decode.
+      (25.5 ms driver timestamp→dequeue, 14.6 ms software MJPEG decode).
+      VA-API JPEG decode done (`jpeg_decode.cpp`, `--camera-decode auto|software`, falls back to
+      software): decode 1 ms → VPP repack 4:2:2→NV12 4.5 ms → download 2.7 ms → CPU 601-full→709-
+      limited pass 2.4 ms (Mesa VPP ignores colour properties for YUV→YUV). Convert 14.5 → 11 ms,
+      CPU ~13 → ~3 ms/frame, so the capture thread keeps up: timestamp→dequeue 25 → 20 ms, camera
+      drops ~250 → ~5 per 25 s; sender capture→encoded 45 → 36–41 ms. Further gain needs the
+      zero-copy item (VA surface straight to the encoder, BT.601 full range signalled in the VUI).
 - [ ] **10 macOS** — AVFoundation camera, ScreenCaptureKit, VideoToolbox (low-latency RC, HEVC),
       CoreAudio via miniaudio, codesign + camera/mic/screen entitlements. Platform splits exist
       (`camera_none.cpp`, `codec_probe_generic.cpp`, `audio_device_none.cpp`).

@@ -19,6 +19,7 @@ struct CaptureConfig {
     int height = 1080;
     int fps = 60;
     Format format = Format::Auto; // Auto: NV12 if it supports the fps, else MJPEG
+    bool hwJpegDecode = true;     // MJPEG: VA-API decode where the GPU has it
 };
 
 struct ScreenConfig {

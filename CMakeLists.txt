@@ -89,12 +89,14 @@ endif()
 if(CMAKE_SYSTEM_NAME STREQUAL "Linux")
     pkg_check_modules(LIBVA REQUIRED IMPORTED_TARGET libva libva-drm)
     pkg_check_modules(PIPEWIRE REQUIRED IMPORTED_TARGET libpipewire-0.3)
-    target_sources(p2pcore PRIVATE src/video/codec_probe_linux.cpp src/video/camera_v4l2.cpp
+    target_sources(p2pcore PRIVATE src/video/codec_probe_linux.cpp src/video/camera_v4l2.cpp src/video/jpeg_decode.cpp
                                    src/video/screen_capture_pipewire.cpp)
     target_link_libraries(p2pcore PRIVATE PkgConfig::LIBVA PkgConfig::PIPEWIRE Qt6::DBus)
     # SPA's C headers use designated initialisers and casts g++ warns about.
     set_source_files_properties(src/video/screen_capture_pipewire.cpp PROPERTIES COMPILE_OPTIONS
         "-Wno-missing-field-initializers;-Wno-pedantic")
+    # Per-pixel colour conversion on the camera path: optimise even in Debug.
+    set_source_files_properties(src/video/jpeg_decode.cpp PROPERTIES COMPILE_OPTIONS "-O3")
 else()
     # macOS VideoToolbox probe arrives in the macOS port phase.
     target_sources(p2pcore PRIVATE src/video/codec_probe_generic.cpp src/video/camera_none.cpp
@@ -138,4 +140,9 @@ if(P2P_BUILD_TESTS)
         target_link_libraries(${t} PRIVATE p2pcore Qt6::Test)
         add_test(NAME ${t} COMMAND ${t})
     endforeach()
+    if(CMAKE_SYSTEM_NAME STREQUAL "Linux")
+        qt_add_executable(test_jpeg_decode tests/test_jpeg_decode.cpp)
+        target_link_libraries(test_jpeg_decode PRIVATE p2pcore Qt6::Test PkgConfig::FFMPEG)
+        add_test(NAME test_jpeg_decode COMMAND test_jpeg_decode)
+    endif()
 endif()
