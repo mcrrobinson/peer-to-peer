@@ -20,7 +20,7 @@ MediaCaps navi10Caps()
 
 struct Impair {
     double loss = 0.0, burst = 1.0;
-    p2p::video::VideoStreamConfig::Fec fec = p2p::video::VideoStreamConfig::Fec::Auto;
+    p2p::video::VideoStreamConfig::Fec fec = p2p::video::VideoStreamConfig{}.fec;
     double fecRate = 0.2;
     bool nack = true;
     bool audioDred = false; // DRED instead of in-band FEC
@@ -246,16 +246,17 @@ private slots:
         return {tx, rx};
     }
 
-    void videoKeyframeFallbackWithoutRecovery()
+    void videoResyncsWithoutNackOrFec()
     {
-        // No NACK, no FEC: every loss costs a keyframe, but nothing corrupt is shown.
+        // No NACK, no FEC: every loss costs a recovery frame (native encoder)
+        // or a keyframe, and nothing corrupt is shown.
         Impair imp;
         imp.loss = 0.05;
         imp.nack = false;
         imp.fec = p2p::video::VideoStreamConfig::Fec::Off;
         auto [tx, rx] = runImpaired(imp, 30, "keyframe-only");
         QVERIFY(rx.assembler.framesLost >= 1);
-        QVERIFY(tx.keyframes >= 2);
+        QVERIFY2(tx.keyframes + tx.recoveries >= 2, qPrintable(QString("key %1 recoveries %2").arg(tx.keyframes).arg(tx.recoveries)));
         QCOMPARE(rx.patternBad, 0u);
     }
 
@@ -291,13 +292,28 @@ private slots:
 
     void videoSurvivesBurstLossWithAutoFec()
     {
-        // 5% loss in bursts of ~4 packets, default settings (NACK + auto FEC).
+        // 5% loss in bursts of ~4 packets, default settings (NACK + hybrid FEC).
         Impair imp;
         imp.loss = 0.05;
         imp.burst = 4;
         auto [tx, rx] = runImpaired(imp, 120, "burst-auto");
         QVERIFY(tx.reportedLoss > 0.0 || tx.fecRate > 0.0 || tx.parityFragments > 0);
         QVERIFY2(rx.assembler.framesLost <= 1, qPrintable(QString::number(rx.assembler.framesLost)));
+        QCOMPARE(rx.patternBad, 0u);
+    }
+
+    void windowFecRepairsWithoutResends()
+    {
+        // Cross-frame FEC alone (no NACK): rebuilt packets reach the decoder
+        // intact.
+        Impair imp;
+        imp.loss = 0.03;
+        imp.nack = false;
+        imp.fec = p2p::video::VideoStreamConfig::Fec::Window;
+        auto [tx, rx] = runImpaired(imp, 90, "window-fec");
+        QVERIFY(tx.parityFragments > 0);
+        QVERIFY(rx.assembler.fecRecoveredFragments >= 1);
+        QVERIFY(rx.recoveredDecoded >= 1);
         QCOMPARE(rx.patternBad, 0u);
     }
 

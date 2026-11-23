@@ -49,6 +49,7 @@ add_library(p2pcore STATIC
     src/video/video_packetizer.h  src/video/video_packetizer.cpp
     src/video/video_encoder.h     src/video/video_encoder.cpp
     src/video/hevc_headers.h      src/video/hevc_headers.cpp
+    src/video/window_fec.h        src/video/window_fec.cpp
     src/video/video_decoder.h     src/video/video_decoder.cpp
     src/video/rate_ladder.h       src/video/rate_ladder.cpp
     src/video/latency_stages.cpp
@@ -137,7 +138,7 @@ target_compile_options(latency_probe PRIVATE -O2) # the analysis is a brute-forc
 
 if(P2P_BUILD_TESTS)
     enable_testing()
-    foreach(t test_crypto test_negotiation test_jitter_buffer test_drift_resampler test_transport test_fec test_video_packetizer test_congestion test_call)
+    foreach(t test_crypto test_negotiation test_jitter_buffer test_drift_resampler test_transport test_fec test_window_fec test_video_packetizer test_congestion test_call)
         qt_add_executable(${t} tests/${t}.cpp)
         target_link_libraries(${t} PRIVATE p2pcore Qt6::Test)
         add_test(NAME ${t} COMMAND ${t})

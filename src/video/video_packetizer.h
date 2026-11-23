@@ -40,7 +40,9 @@ struct FragmentHeader {
     // kTestPattern: the sender's source is the synthetic pattern, so the
     // receiver can verify the frame number embedded in the pixels.
     // kRetransmit: a resend in answer to a NACK.
-    enum Flags : uint8_t { kKeyframe = 1, kTestPattern = 2, kRetransmit = 4 };
+    // kWindowParity: a sliding-window FEC packet (window_fec.h), not part of
+    // any frame's fragments.
+    enum Flags : uint8_t { kKeyframe = 1, kTestPattern = 2, kRetransmit = 4, kWindowParity = 8 };
 
     uint32_t frameId = 0;
     uint16_t index = 0;
@@ -72,6 +74,16 @@ struct PacketizeOptions {
     int64_t encodedUs = 0; // when the encoder produced the frame (0 = unknown), sender clock
     uint8_t refBack = 1;   // frames back to the reference (ignored for keyframes)
 };
+
+// How packetizeFrame splits a frame: data fragments (0 = too large) and
+// Reed-Solomon parity per block.
+struct FragmentPlan {
+    size_t count = 0;
+    int fecBlock = 0, fecParity = 0;
+    int blocks() const { return fecParity ? int((count + size_t(fecBlock) - 1) / size_t(fecBlock)) : 0; }
+    int parityTotal() const { return blocks() * fecParity; }
+};
+FragmentPlan planFragments(size_t size, size_t maxPayload, const PacketizeOptions& opt);
 
 // Calls |sendFragment| once per fragment with a complete payload (header + data):
 // data fragments first, then parity. Returns the number of data
@@ -140,7 +152,8 @@ public:
     void setReorderGraceUs(int64_t us) { cfg_.reorderGraceUs = us; }
     int64_t reorderGraceUs() const { return cfg_.reorderGraceUs; }
 
-    void insert(const FragmentHeader& h, const uint8_t* data, size_t len, int64_t arrivalUs);
+    // |rebuilt|: a data fragment recovered outside the assembler (window FEC).
+    void insert(const FragmentHeader& h, const uint8_t* data, size_t len, int64_t arrivalUs, bool rebuilt = false);
     // Frames that can be decoded now, in order.
     std::vector<AssembledFrame> poll(int64_t nowUs);
     // Fragments worth requesting again now (FEC can't cover them).

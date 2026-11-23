@@ -5,6 +5,7 @@
 #include "video/video_encoder.h"
 #include "video/rate_ladder.h"
 #include "video/video_packetizer.h"
+#include "video/window_fec.h"
 #include "video/video_source.h"
 
 #include <QString>
@@ -26,7 +27,10 @@ namespace p2p::video {
 
 struct VideoStreamConfig {
     enum class Source { Camera, Pattern, Flash, Screen, None };
-    enum class Fec { Off, Auto, Fixed };
+    // Window: sliding-window FEC across frames (window_fec.h) at the Auto rate.
+    // Hybrid: per frame, Auto's per-frame parity when its rounded-up cost
+    // fits the spare budget, else the frame goes to the window code.
+    enum class Fec { Off, Auto, Fixed, Window, Hybrid };
     Source source = Source::Camera;
     CaptureConfig capture;             // camera, and the pattern's size / rate
     ScreenConfig screen;               // Source::Screen
@@ -36,7 +40,7 @@ struct VideoStreamConfig {
     int minBitrateKbps = 300;
     bool congestionControl = true; // follow the transport's target via the rate ladder
     bool fallbackToPattern = true; // camera unavailable (e.g. held by another instance)
-    Fec fec = Fec::Auto;
+    Fec fec = Fec::Hybrid;
     double fecFixedRate = 0.2;     // parity / data for Fec::Fixed
     bool nack = true;
 };
@@ -55,6 +59,11 @@ enum class VideoFeedback : uint8_t { PictureLoss = 1, Nack = 2, Recover = 3 };
 // get more because losing one costs a full refresh.
 double autoFecRate(double loss, bool keyframe);
 
+// Hybrid FEC: does per-frame Reed-Solomon at |rate| for a frame of
+// |frameBytes| cost at most |cap| x its data fragments once rounded up to
+// whole parity fragments per block?
+bool perFrameFecFits(size_t frameBytes, size_t maxPayload, double rate, double cap);
+
 // Capture -> [scale] -> encode -> packetize -> pacer/transport. Runs on the
 // source's thread. With congestion control the encoder follows a rate
 // ladder (re-opened on each rung change) and frames are skipped while the
@@ -65,6 +74,7 @@ public:
         uint64_t captured = 0, encoded = 0, keyframes = 0, pliReceived = 0, bytes = 0, encodeErrors = 0;
         uint64_t recoverReceived = 0, recoveries = 0; // requests; frames sent that predict from the receiver's last
         uint64_t nackItems = 0, retransmitted = 0, retransmitMisses = 0, parityFragments = 0;
+        uint64_t fecPerFrameFrames = 0, fecWindowFrames = 0; // Fec::Hybrid's choices
         double encodeAvgMs = 0, encodeMaxMs = 0;
         double kbps = 0, fps = 0;
         double reportedLoss = 0, fecRate = 0; // loss: the congestion controller's estimate
@@ -128,6 +138,7 @@ private:
     double lastFecRate_ = 0;
     double fecCap_ = 1.0; // auto FEC may only use the budget left above the current rung
     uint32_t frameId_ = 0;
+    WindowFecEncoder windowFec_;
     std::atomic<bool> forceKeyframe_{true};
     std::atomic<int64_t> recoverFrom_{-1}; // frame id from a Recover request, -1 = none
     std::atomic<int64_t> skipQueueUs_{50'000}; // pacer backlog above which new frames are skipped
@@ -201,6 +212,7 @@ private:
     std::mutex m_;
     std::condition_variable cv_;
     FrameAssembler assembler_;
+    WindowFecDecoder windowFec_; // under m_
     bool wake_ = false;
 
     std::atomic<bool> running_{false};

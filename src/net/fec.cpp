@@ -56,6 +56,10 @@ void mulAdd(uint8_t* dst, const uint8_t* src, uint8_t c, size_t len)
 
 } // namespace
 
+uint8_t gfMul(uint8_t a, uint8_t b) { return gf().mul[a][b]; }
+uint8_t gfInv(uint8_t a) { return gf().inv(a); }
+void gfMulAdd(uint8_t* dst, const uint8_t* src, uint8_t c, size_t len) { mulAdd(dst, src, c, len); }
+
 void encode(const std::vector<const uint8_t*>& data, size_t len, int m, std::vector<std::vector<uint8_t>>& parity)
 {
     const int k = int(data.size());

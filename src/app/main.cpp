@@ -84,7 +84,7 @@ int main(int argc, char** argv)
     QCommandLineOption cameraDecodeOpt("camera-decode", "Camera MJPEG decode: auto (hardware if available) or software.", "how", "auto");
     QCommandLineOption audioFecOpt("audio-fec", "Opus loss protection: lbrr (in-band FEC) or dred.", "mode",
                                    "lbrr");
-    QCommandLineOption fecOpt("fec", "Video FEC: auto, off, or a fixed parity percentage.", "mode", "auto");
+    QCommandLineOption fecOpt("fec", "Video FEC: hybrid (default: per frame when its rounding fits the spare budget, else across frames), auto (per frame), window (across frames), off, or a fixed parity percentage.", "mode", "hybrid");
     QCommandLineOption noNackOpt("no-nack", "Disable video retransmission requests.");
     QCommandLineOption simBurstOpt("sim-burst", "Mean length of simulated loss bursts, in packets (testing).", "n",
                                    "1");
@@ -183,11 +183,13 @@ int main(int argc, char** argv)
     const QString fec = cli.value(fecOpt);
     if (fec == "auto") video.fec = p2p::video::VideoStreamConfig::Fec::Auto;
     else if (fec == "off") video.fec = p2p::video::VideoStreamConfig::Fec::Off;
+    else if (fec == "window") video.fec = p2p::video::VideoStreamConfig::Fec::Window;
+    else if (fec == "hybrid") video.fec = p2p::video::VideoStreamConfig::Fec::Hybrid;
     else {
         bool ok = false;
         const double pct = fec.toDouble(&ok);
         if (!ok || pct <= 0 || pct > 100) {
-            std::fprintf(stderr, "--fec must be auto, off or a percentage\n");
+            std::fprintf(stderr, "--fec must be auto, window, hybrid, off or a percentage\n");
             return 1;
         }
         video.fec = p2p::video::VideoStreamConfig::Fec::Fixed;

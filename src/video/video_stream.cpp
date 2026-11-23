@@ -52,6 +52,15 @@ void updateRate(int64_t now, uint64_t bytes, uint64_t frames, uint64_t& lastByte
 }
 } // namespace
 
+bool perFrameFecFits(size_t frameBytes, size_t maxPayload, double rate, double cap)
+{
+    if (rate <= 0) return false;
+    PacketizeOptions opt;
+    opt.fecRate = rate;
+    const FragmentPlan plan = planFragments(frameBytes, maxPayload, opt);
+    return plan.count > 0 && double(plan.parityTotal()) <= cap * double(plan.count) + 1e-9;
+}
+
 double autoFecRate(double loss, bool keyframe)
 {
     if (loss < 0.002) return 0.0;
@@ -367,6 +376,12 @@ void VideoSendStream::onFrame(std::shared_ptr<VideoFrame> f)
     int64_t encodedUs = 0;
     double fecRate = 0;
     const uint8_t codecId = uint8_t(sel_.codec);
+    const bool window = cfg_.fec == VideoStreamConfig::Fec::Window || cfg_.fec == VideoStreamConfig::Fec::Hybrid;
+    int windowFrames = 0, perFrameFrames = 0;
+    // Window FEC: about 50 ms of frames per parity packet; data fragments
+    // leave room for the parity framing.
+    windowFec_.setWindow(std::clamp(fps / 20 + 1, 2, 8));
+    const size_t maxPayload = net::wire::kMaxPayload - (window ? WindowFecEncoder::overhead(windowFec_.window()) : 0);
     const bool ok = encoder_->encode(*in, key, [&](const uint8_t* data, size_t size, bool isKey) {
         wasKey |= isKey;
         bytes += size;
@@ -383,25 +398,44 @@ void VideoSendStream::onFrame(std::shared_ptr<VideoFrame> f)
             opt.fecRate = std::min(autoFecRate(lossEstimate_.load(), isKey), fecCap_);
             break;
         case VideoStreamConfig::Fec::Fixed: opt.fecRate = cfg_.fecFixedRate; break;
+        case VideoStreamConfig::Fec::Window: fecRate = std::min(autoFecRate(lossEstimate_.load(), isKey), fecCap_); break;
+        case VideoStreamConfig::Fec::Hybrid:
+            fecRate = std::min(autoFecRate(lossEstimate_.load(), isKey), fecCap_);
+            if (perFrameFecFits(size, maxPayload, fecRate, fecCap_)) {
+                opt.fecRate = fecRate;
+                ++perFrameFrames;
+            } else if (fecRate > 0) {
+                ++windowFrames;
+            }
+            break;
         }
-        fecRate = opt.fecRate;
+        if (!window) fecRate = opt.fecRate;
+        const double windowRate = opt.fecRate > 0 ? 0.0 : fecRate;
 
         SentFrame sent;
         sent.id = frameId_++;
         sent.sentUs = t0;
         packetizeFrame(
-            sent.id, f->captureUs, isKey, codecId, data, size, net::wire::kMaxPayload,
+            sent.id, f->captureUs, isKey, codecId, data, size, maxPayload,
             [&](const uint8_t* p, size_t n) {
                 transport_.sendPaced(net::wire::kMedia, streamId_, p, n);
                 auto h = FragmentHeader::read(p, n);
                 if (h && h->isParity()) {
                     ++parity;
-                } else if (cfg_.nack) {
+                    return;
+                }
+                if (window) windowFec_.add(sent.id, p, n);
+                if (cfg_.nack) {
                     sent.fragments.emplace_back(p, p + n);
                     sent.bytes += n;
                 }
             },
             opt);
+        if (window)
+            for (const auto& pkt : windowFec_.endFrame(sent.id, windowRate, net::wire::kMaxPayload)) {
+                transport_.sendPaced(net::wire::kMedia, streamId_, pkt.data(), pkt.size());
+                ++parity;
+            }
         if (cfg_.nack) {
             std::lock_guard l(historyMutex_);
             historyBytes_ += sent.bytes;
@@ -426,6 +460,8 @@ void VideoSendStream::onFrame(std::shared_ptr<VideoFrame> f)
     if (recovering && !wasKey) ++st_.recoveries;
     st_.bytes += bytes;
     st_.parityFragments += parity;
+    st_.fecPerFrameFrames += uint64_t(perFrameFrames);
+    st_.fecWindowFrames += uint64_t(windowFrames);
     st_.fecRate = fecRate;
     st_.reportedLoss = lossEstimate_.load();
     lastFecRate_ = fecRate;
@@ -492,7 +528,16 @@ void VideoReceiveStream::onFragment(const uint8_t* data, size_t len, int64_t arr
     bytesIn_.fetch_add(len, std::memory_order_relaxed);
     {
         std::lock_guard l(m_);
-        assembler_.insert(*h, data + FragmentHeader::kSize, len - FragmentHeader::kSize, arrivalUs);
+        std::vector<std::vector<uint8_t>> rebuilt;
+        if (h->flags & FragmentHeader::kWindowParity) {
+            rebuilt = windowFec_.onParity(data, len);
+        } else {
+            assembler_.insert(*h, data + FragmentHeader::kSize, len - FragmentHeader::kSize, arrivalUs);
+            if (!h->isParity()) rebuilt = windowFec_.onData(data, len);
+        }
+        for (const auto& pkt : rebuilt)
+            if (auto rh = FragmentHeader::read(pkt.data(), pkt.size()))
+                assembler_.insert(*rh, pkt.data() + FragmentHeader::kSize, pkt.size() - FragmentHeader::kSize, arrivalUs, true);
         wake_ = true;
     }
     cv_.notify_one();
@@ -583,8 +628,11 @@ void VideoReceiveStream::decodeLoop()
             cv_.wait_for(l, std::chrono::milliseconds(2), [&] { return wake_ || !running_; });
             wake_ = false;
             const int64_t now = nowUs();
+            // Window FEC repairs a frame from the parity of later ones:
+            // wait for that before calling the frame lost.
+            const int64_t windowGrace = windowFec_.spanUs() ? windowFec_.spanUs() + 20'000 : 0;
+            if (nack_ || windowGrace) assembler_.setReorderGraceUs(std::max(nack_ ? nackGrace : 20'000, windowGrace));
             if (nack_) {
-                assembler_.setReorderGraceUs(nackGrace);
                 nacks = assembler_.collectNacks(now, policy);
             }
             frames = assembler_.poll(now);

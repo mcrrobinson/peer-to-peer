@@ -44,6 +44,7 @@ QString formatSend(const char* label, const video::VideoSendStream::Stats& v)
         .arg(QLatin1String(label))
         .arg(v.recoverReceived)
         .arg(v.recoveries) +
+           QStringLiteral(" | fec frames per-frame %1 window %2").arg(v.fecPerFrameFrames).arg(v.fecWindowFrames) +
            (v.stages.isEmpty() ? QString() : QStringLiteral("\n     stages ms avg/p95: %1").arg(v.stages));
 }
 

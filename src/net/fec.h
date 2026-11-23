@@ -20,4 +20,9 @@ void encode(const std::vector<const uint8_t*>& data, size_t len, int m, std::vec
 // if fewer than k shards are present.
 bool decode(int k, int m, size_t len, std::vector<std::vector<uint8_t>>& shards);
 
+// The field itself (0x11d polynomial), for other codes over it.
+uint8_t gfMul(uint8_t a, uint8_t b);
+uint8_t gfInv(uint8_t a); // a != 0
+void gfMulAdd(uint8_t* dst, const uint8_t* src, uint8_t c, size_t len); // dst ^= c * src
+
 } // namespace p2p::net::fec

@@ -68,16 +68,32 @@ std::optional<FragmentHeader> FragmentHeader::read(const uint8_t* p, size_t len)
     return h;
 }
 
+FragmentPlan planFragments(size_t size, size_t maxPayload, const PacketizeOptions& opt)
+{
+    FragmentPlan plan;
+    if (maxPayload <= FragmentHeader::kSize + kLenPrefix || size == 0) return plan;
+    // Room for the FEC length prefix so parity fragments fit too.
+    const size_t chunk = maxPayload - FragmentHeader::kSize - kLenPrefix;
+    const size_t count = (size + chunk - 1) / chunk;
+    if (count > 0xfff0) return plan;
+    plan.count = count;
+    if (opt.fecRate > 0) {
+        const int block = std::clamp(opt.fecBlockSize, 1, 200);
+        const int blockLen = std::min<int>(block, int(count));
+        plan.fecBlock = block;
+        plan.fecParity = std::clamp(int(std::ceil(blockLen * opt.fecRate)), 1, 255 - block);
+    }
+    return plan;
+}
+
 size_t packetizeFrame(uint32_t frameId, int64_t captureUs, bool keyframe, uint8_t codec, const uint8_t* data,
                       size_t size, size_t maxPayload,
                       const std::function<void(const uint8_t* payload, size_t len)>& sendFragment,
                       const PacketizeOptions& opt)
 {
-    if (maxPayload <= FragmentHeader::kSize + kLenPrefix || size == 0) return 0;
-    // Room for the FEC length prefix so parity fragments fit too.
-    const size_t chunk = maxPayload - FragmentHeader::kSize - kLenPrefix;
-    const size_t count = (size + chunk - 1) / chunk;
-    if (count > 0xfff0) return 0;
+    const FragmentPlan plan = planFragments(size, maxPayload, opt);
+    const size_t count = plan.count;
+    if (count == 0) return 0;
 
     // Spread bytes evenly so the last fragment isn't a tiny runt.
     const size_t per = (size + count - 1) / count;
@@ -94,12 +110,8 @@ size_t packetizeFrame(uint32_t frameId, int64_t captureUs, bool keyframe, uint8_
         h.encodeDelay10Us = uint16_t(std::clamp<int64_t>((opt.encodedUs - captureUs) / 10, 0, 0xffff));
     h.width = opt.width;
     h.height = opt.height;
-    if (opt.fecRate > 0) {
-        const int block = std::clamp(opt.fecBlockSize, 1, 200);
-        const int blockLen = std::min<int>(block, int(count));
-        h.fecBlock = uint8_t(block);
-        h.fecParity = uint8_t(std::clamp(int(std::ceil(blockLen * opt.fecRate)), 1, 255 - block));
-    }
+    h.fecBlock = uint8_t(plan.fecBlock);
+    h.fecParity = uint8_t(plan.fecParity);
 
     size_t off = 0;
     for (size_t i = 0; i < count; ++i) {
@@ -141,9 +153,9 @@ size_t packetizeFrame(uint32_t frameId, int64_t captureUs, bool keyframe, uint8_
 
 // ------------------------------------------------------------ FrameAssembler
 
-void FrameAssembler::insert(const FragmentHeader& h, const uint8_t* data, size_t len, int64_t arrivalUs)
+void FrameAssembler::insert(const FragmentHeader& h, const uint8_t* data, size_t len, int64_t arrivalUs, bool rebuilt)
 {
-    ++st_.fragments;
+    if (!rebuilt) ++st_.fragments;
     if (h.flags & FragmentHeader::kRetransmit) ++st_.retransmitsReceived;
     if (h.isParity()) ++st_.parityReceived;
     if ((haveNext_ || haveFloor_) && int32_t(h.frameId - nextId_) < 0) {
@@ -200,6 +212,11 @@ void FrameAssembler::insert(const FragmentHeader& h, const uint8_t* data, size_t
         if (!p.chunks[h.index].empty() || len == 0) return; // duplicate fragment
         p.chunks[h.index].assign(data, data + len);
         ++p.received;
+        if (rebuilt) {
+            ++st_.fecRecoveredFragments;
+            if (!p.recovered) ++st_.fecRecoveredFrames;
+            p.recovered = true;
+        }
         if (h.flags & FragmentHeader::kRetransmit) {
             ++st_.retransmitsUseful;
             p.recovered = true;

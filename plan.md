@@ -237,6 +237,29 @@ Congestion control (phase 6), in `MediaTransport` because it sees every packet:
       - [x] 4 Intra refresh: dropped — no gap left. After step 3, no PLIs and no loss-driven IDRs
             in any scenario; the remaining IDRs are resolution changes (a new SPS needs one
             anyway), and the spike measured ~4 dB lost at the same rate.
+    - Streaming codes (Tambur-style, without its learned overhead model). `--fec window`: each
+      parity packet is a random GF(256) combination of every data packet of the last ≈50 ms of
+      frames (2–8 frames; `window_fec.{h,cpp}`), at the auto rate as an exact fraction of
+      packets carried across frames; the receiver solves across frames and waits the window's
+      span before calling a frame lost. `--fec hybrid` (now the default): per frame, the old
+      per-frame RS if its cost rounded up to whole parity packets fits the spare budget above
+      the rung (`fecCap_`), else the window code. Tests: lost frame rebuilt from later parity,
+      fractional rate, 5% random loss (all rebuilt packets exact), resends, `planFragments`
+      matches the packetizer, the hybrid rule, window FEC end to end in a call.
+      A/B, 3 runs × 2 directions, per direction over t ≥ 5 s, p95 = mean of the rolling
+      240-frame p95 (`t2sum.py`):
+      | link                   | auto p95 | window p95 | hybrid p95 | notes |
+      | 2 Mbps / 20 ms / 2%    | 45       | 77         | 45         | hybrid picks per-frame 89% |
+      | 600 kbps / 20 ms / 2%  | 157      | 77         | 76         | auto: 15 frames skipped by the pacer, 18 link drops; hybrid/window 0 |
+      | 800 kbps / 80 ms / 2%  | 146      | 218        | 218        | auto skips 143 frames (~10%), video 281 vs 319 kbps |
+      | 4 Mbps / 80 ms / 2%    | 173      | 194        | 201        | noise (p = 0.28); lost 7.5 → 1.5 |
+      | same, bursts of 3      | 271      | 245        | 273        | noise; lost 25 → 8 (p = 0.06) |
+      | 3 Mbps clean           | 35       | 35         | 35         | no FEC wanted |
+      600 kbps and 2 Mbps differences are complete separations (p = 0.002, permutation; the two
+      directions of a run aren't fully independent). The 800 kbps trade is real: auto keeps
+      its tail by dropping ~6 frames/s at the sender (those never count in latency); hybrid sends
+      every frame at +72 ms p95. Also fixed: a stale call test that expected every loss to cost
+      a keyframe (flaky since the native encoder recovers without one).
 - [ ] **10 macOS** — AVFoundation camera, ScreenCaptureKit, VideoToolbox (low-latency RC, HEVC),
       CoreAudio via miniaudio, codesign + camera/mic/screen entitlements. Platform splits exist
       (`camera_none.cpp`, `codec_probe_generic.cpp`, `audio_device_none.cpp`).
