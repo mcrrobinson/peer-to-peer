@@ -20,6 +20,11 @@ struct CaptureConfig {
     int fps = 60;
     Format format = Format::Auto; // Auto: NV12 if it supports the fps, else MJPEG
     bool hwJpegDecode = true;     // MJPEG: VA-API decode where the GPU has it
+    // Test pattern only: % of luma pixels below the code strip replaced with
+    // noise, for tests that need an encoder to spend its whole budget (the
+    // plain pattern is a smooth gradient: VideoToolbox codes it far below
+    // the target and doesn't pad). 0 = plain pattern.
+    int patternDetail = 0;
 };
 
 struct ScreenConfig {
@@ -68,19 +73,21 @@ std::unique_ptr<VideoSource> createScreenSource(const ScreenConfig& cfg, std::fu
 class TestPatternSource : public VideoSource {
 public:
     static constexpr int kCodeBits = 32;
-    TestPatternSource(int width, int height, int fps) : w_(width & ~1), h_(height & ~1), fps_(fps) {}
+    TestPatternSource(int width, int height, int fps, int detailPct = 0)
+        : w_(width & ~1), h_(height & ~1), fps_(fps), detail_(detailPct) {}
     ~TestPatternSource() override { stop(); }
     bool start(Callback cb, QString* error) override;
     void stop() override;
     QString description() const override;
     int fps() const override { return fps_; }
 
-    static void render(VideoFrame& f, uint32_t frameNo);
+    // |detailPct|: CaptureConfig::patternDetail.
+    static void render(VideoFrame& f, uint32_t frameNo, int detailPct = 0);
     // Reads the frame number back from a (decoded) frame; nullopt if unreadable.
     static std::optional<uint32_t> readCode(const VideoFrame& f);
 
 private:
-    int w_, h_, fps_;
+    int w_, h_, fps_, detail_;
     std::atomic<bool> running_{false};
     std::thread thread_;
 };

@@ -1,6 +1,7 @@
 #include "core/clock.h"
 #include "video/video_source.h"
 
+#include <algorithm>
 #include <chrono>
 #include <cstring>
 
@@ -30,7 +31,7 @@ bool TestPatternSource::start(Callback cb, QString* error)
             auto f = std::make_shared<VideoFrame>();
             f->allocate(w_, h_);
             f->id = n;
-            render(*f, n++);
+            render(*f, n++, detail_);
             f->captureUs = nowUs();
             cb(std::move(f));
             next += interval;
@@ -52,7 +53,7 @@ QString TestPatternSource::description() const
     return QStringLiteral("test pattern %1x%2 @ %3 fps").arg(w_).arg(h_).arg(fps_);
 }
 
-void TestPatternSource::render(VideoFrame& f, uint32_t frameNo)
+void TestPatternSource::render(VideoFrame& f, uint32_t frameNo, int detailPct)
 {
     const int w = f.width, h = f.height;
     uint8_t* y = f.y();
@@ -76,6 +77,18 @@ void TestPatternSource::render(VideoFrame& f, uint32_t frameNo)
         for (int col = 0; col < w / 2; ++col) {
             line[2 * col] = uint8_t(cu + (row * 64 / (h / 2)) - 32);
             line[2 * col + 1] = uint8_t(128 + (col * 64 / (w / 2)) - 32);
+        }
+    }
+    // Detail: noise on |detailPct| % of the pixels below the code strip.
+    if (detailPct > 0) {
+        uint32_t seed = 0x9e3779b9u * (frameNo + 1);
+        const uint32_t threshold = uint32_t(std::min(detailPct, 100)) * 42949673u; // pct of 2^32
+        for (int row = kMargin + kBlock + 8; row < h; ++row) {
+            uint8_t* line = y + size_t(row) * size_t(w);
+            for (int col = 0; col < w; ++col) {
+                seed = seed * 1664525u + 1013904223u;
+                if (seed < threshold) line[col] = uint8_t(16 + (seed >> 8) % 220);
+            }
         }
     }
     // Frame-number code: black backing strip, then one block per bit (MSB first).

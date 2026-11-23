@@ -13,7 +13,7 @@
 namespace p2p::video {
 
 // Low-latency encoder over FFmpeg:
-//   hardware: hevc_vaapi / av1_vaapi (VideoToolbox on macOS later)
+//   hardware: hevc_vaapi / av1_vaapi (Linux), hevc_videotoolbox (macOS)
 //   software: libx265 (ultrafast, zerolatency) / libsvtav1 (RTC preset, low-delay)
 // Settings: P-frames only (no B-frames, no lookahead), CBR with a ~1 frame
 // VBV, effectively infinite GOP with IDR on demand (picture loss).
@@ -60,9 +60,10 @@ public:
     // How far apart the frames kept for recovery are (native HEVC).
     void setAnchorInterval(int frames);
 
-    // Hardware HEVC on Linux: our own VA-API encoder (hevc_vaapi_encoder.h)
-    // instead of FFmpeg's hevc_vaapi (--encoder native|ffmpeg). Falls back
-    // to FFmpeg if the driver can't. Default on; set before opening encoders.
+    // Hardware HEVC: our own encoder -- VA-API on Linux (hevc_vaapi_encoder.h),
+    // VideoToolbox on macOS (hevc_vt_encoder.h) -- instead of FFmpeg's
+    // (--encoder native|ffmpeg). Falls back to FFmpeg if the driver can't.
+    // Default on; set before opening encoders.
     static void setNativeHevc(bool on);
 
 private:

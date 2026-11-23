@@ -202,7 +202,7 @@ bool VideoSendStream::start(QString* error)
         if (!source_->start(onFrame, error)) return false;
     }
     if (cfg_.source == VideoStreamConfig::Source::Pattern) {
-        source_ = std::make_unique<TestPatternSource>(c.width, c.height, c.fps);
+        source_ = std::make_unique<TestPatternSource>(c.width, c.height, c.fps, c.patternDetail);
         if (!source_->start(onFrame, error)) return false;
     }
     sendingPattern_ = cfg_.source == VideoStreamConfig::Source::Pattern;

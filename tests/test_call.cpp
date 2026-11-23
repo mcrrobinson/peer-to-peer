@@ -28,6 +28,7 @@ struct Impair {
     bool audioDred = false; // DRED instead of in-band FEC
     p2p::net::MediaTransport::LinkSim link; // bottleneck on this peer's outgoing media
     bool cc = true;
+    int patternDetail = 0; // CaptureConfig::patternDetail of the video source
 };
 
 std::unique_ptr<CallController> makePeer(const QString& name, bool autoAccept, MediaCaps caps = navi10Caps(),
@@ -49,6 +50,7 @@ std::unique_ptr<CallController> makePeer(const QString& name, bool autoAccept, M
     o.mediaConfig.video.capture.width = 1280;
     o.mediaConfig.video.capture.height = 720;
     o.mediaConfig.video.capture.fps = 30;
+    o.mediaConfig.video.capture.patternDetail = imp.patternDetail;
     o.mediaConfig.video.bitrateKbps = 4000;
     o.mediaConfig.simulatedBurst = imp.burst;
     o.mediaConfig.audio.opus.inbandFec = !imp.audioDred;
@@ -336,6 +338,7 @@ private slots:
         Impair imp;
         imp.link.rateBps = 2'000'000;
         imp.link.delayUs = 5'000;
+        imp.patternDetail = 2; // so encoders that don't pad (VideoToolbox) send the full 4 Mbps
         auto [tx, rx] = runImpaired(imp, 240, "bottleneck 2M");
         qInfo("bottleneck: rung %d kbps %dx%d, switches %llu, skipped %llu, budget %.0f kbps",
               tx.rungKbps, tx.width, tx.height, (unsigned long long)tx.rungSwitches,
@@ -351,6 +354,7 @@ private slots:
     void congestionControlStaysOutOfTheWayOnLan()
     {
         Impair imp;
+        imp.patternDetail = 2; // a real 4 Mbps stream (see the bottleneck test)
         auto [tx, rx] = runImpaired(imp, 90, "lan cc");
         QCOMPARE(tx.rungSwitches, 0u);
         QCOMPARE(tx.rungKbps, 4000);

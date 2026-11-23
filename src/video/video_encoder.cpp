@@ -1,6 +1,8 @@
 #include "video/video_encoder.h"
 
-#ifndef __APPLE__
+#ifdef __APPLE__
+#include "video/hevc_vt_encoder.h"
+#else
 #include "video/hevc_vaapi_encoder.h"
 #include "video/vaapi_device.h"
 #endif
@@ -57,7 +59,9 @@ struct VideoEncoder::Impl {
     AVPacket* pkt = nullptr;
     bool lastKey = false; // FFmpeg path: the packet being handed out is a keyframe
     uint32_t nextId = 0;  // frame numbering when the caller gives none
-#ifndef __APPLE__
+#ifdef __APPLE__
+    std::unique_ptr<HevcVtEncoder> vt;
+#else
     std::unique_ptr<HevcVaapiEncoder> native;
 #endif
 
@@ -84,16 +88,18 @@ void VideoEncoder::setNativeHevc(bool on) { gNativeHevc = on; }
 
 bool VideoEncoder::liveBitrate() const
 {
-#ifndef __APPLE__
-    return d->native != nullptr;
+#ifdef __APPLE__
+    return d->vt != nullptr;
 #else
-    return false;
+    return d->native != nullptr;
 #endif
 }
 
 int VideoEncoder::refBack() const
 {
-#ifndef __APPLE__
+#ifdef __APPLE__
+    if (d->vt) return d->vt->lastRefBack();
+#else
     if (d->native) return d->native->lastRefBack();
 #endif
     return d->lastKey ? 0 : 1;
@@ -101,7 +107,9 @@ int VideoEncoder::refBack() const
 
 bool VideoEncoder::recoverFrom(uint32_t goodFrameId)
 {
-#ifndef __APPLE__
+#ifdef __APPLE__
+    if (d->vt) return d->vt->recoverFrom(goodFrameId);
+#else
     if (d->native) return d->native->recoverFrom(goodFrameId);
 #endif
     (void)goodFrameId;
@@ -118,7 +126,9 @@ void VideoEncoder::setAnchorInterval(int frames)
 
 void VideoEncoder::setBitrateKbps(int kbps)
 {
-#ifndef __APPLE__
+#ifdef __APPLE__
+    if (d->vt) d->vt->setBitrateKbps(kbps);
+#else
     if (d->native) d->native->setBitrateKbps(kbps);
 #endif
     (void)kbps;
@@ -126,7 +136,9 @@ void VideoEncoder::setBitrateKbps(int kbps)
 
 QString VideoEncoder::name() const
 {
-#ifndef __APPLE__
+#ifdef __APPLE__
+    if (d->vt) return QStringLiteral("hevc_videotoolbox_native");
+#else
     if (d->native) return QStringLiteral("hevc_vaapi_native");
 #endif
     return d->codec ? QString::fromLatin1(d->codec->name) : QStringLiteral("none");
@@ -168,6 +180,28 @@ bool VideoEncoder::init(const Config& cfg, QString* error)
 
     if (cfg.hardware) {
 #ifdef __APPLE__
+        if (cfg.codec == media::Codec::HEVC && gNativeHevc) {
+            HevcVtEncoder::Config nc;
+            nc.width = cfg.width;
+            nc.height = cfg.height;
+            nc.fps = cfg.fps;
+            nc.bitrateKbps = cfg.bitrateKbps;
+            nc.colour = cfg.colour;
+            auto vt = std::make_unique<HevcVtEncoder>();
+            QString why;
+            if (vt->init(nc, &why)) {
+                d->vt = std::move(vt);
+                avcodec_free_context(&d->ctx);
+                qCInfo(lcEnc).noquote() << QStringLiteral("encoder hevc_videotoolbox_native %1x%2 @%3 fps %4 kbps, low-latency RC, LTR%5")
+                                               .arg(cfg.width)
+                                               .arg(cfg.height)
+                                               .arg(cfg.fps)
+                                               .arg(cfg.bitrateKbps)
+                                               .arg(cfg.colour == Colour::Bt601Full ? QStringLiteral(", BT.601 full range") : QString());
+                return true;
+            }
+            qCWarning(lcEnc).noquote() << "native HEVC encoder unavailable, using FFmpeg's:" << why;
+        }
         c->pix_fmt = AV_PIX_FMT_NV12;
 #else
         // The shared device: camera surfaces come in without a copy.
@@ -255,10 +289,11 @@ bool VideoEncoder::encode(const VideoFrame& f, bool forceKeyframe, const Output&
 {
     const uint32_t id = frameId.value_or(d->nextId);
     d->nextId = id + 1;
-#ifndef __APPLE__
-    if (!d->ctx && !d->native) return false;
-#else
+#ifdef __APPLE__
+    if (d->vt) return d->vt->encode(f, id, forceKeyframe, out);
     if (!d->ctx) return false;
+#else
+    if (!d->ctx && !d->native) return false;
 #endif
     AVFrame* input = nullptr;
     int e = 0;

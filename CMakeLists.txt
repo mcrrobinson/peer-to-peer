@@ -102,8 +102,10 @@ if(CMAKE_SYSTEM_NAME STREQUAL "Linux")
     set_source_files_properties(src/video/jpeg_decode.cpp PROPERTIES COMPILE_OPTIONS "-O3")
 elseif(APPLE)
     target_sources(p2pcore PRIVATE src/video/codec_probe_macos.cpp src/video/camera_none.cpp
-                                   src/video/screen_none.cpp)
-    target_link_libraries(p2pcore PRIVATE "-framework VideoToolbox" "-framework CoreMedia" "-framework CoreFoundation")
+                                   src/video/screen_none.cpp
+                                   src/video/hevc_vt_encoder.cpp)
+    target_link_libraries(p2pcore PRIVATE "-framework VideoToolbox" "-framework CoreMedia" "-framework CoreVideo"
+                                          "-framework CoreFoundation")
 else()
     target_sources(p2pcore PRIVATE src/video/codec_probe_generic.cpp src/video/camera_none.cpp
                                    src/video/screen_none.cpp)
@@ -156,5 +158,9 @@ if(P2P_BUILD_TESTS)
         qt_add_executable(test_hevc_encoder tests/test_hevc_encoder.cpp)
         target_link_libraries(test_hevc_encoder PRIVATE p2pcore Qt6::Test)
         add_test(NAME test_hevc_encoder COMMAND test_hevc_encoder)
+    elseif(APPLE)
+        qt_add_executable(test_vt_encoder tests/test_vt_encoder.cpp)
+        target_link_libraries(test_vt_encoder PRIVATE p2pcore Qt6::Test)
+        add_test(NAME test_vt_encoder COMMAND test_vt_encoder)
     endif()
 endif()

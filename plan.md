@@ -301,6 +301,35 @@ Congestion control (phase 6), in `MediaTransport` because it sees every packet:
             M3 ("not supported by the encoder"). Expected to be fixed by step 2. Seen once each,
             not reproduced in 5 later runs: `windowFecRepairsWithoutResends`,
             `congestionControlStaysOutOfTheWayOnLan` (first probably load from GUI instances).
+      - [~] 2 VideoToolbox. **Encoder done** (2026-11-23), decoder next.
+            Spike (M3, HEVC, hardware): `EnableLowLatencyRateControl` works for HEVC;
+            `ConstantBitRate`, `MaxFrameDelayCount`, `PrioritizeEncodingSpeedOverQuality` unsupported;
+            `EnableLTR`, `DataRateLimits`, Min/MaxAllowedFrameQP supported. 720p30 with detail,
+            4000→1000→6000→2000 kbps: low-latency RC follows within ~1 s, no keyframes; default RC
+            ignores downward changes (1000 asked → ~2100 out); `DataRateLimits` no effect under
+            low-latency RC. VT never pads: the plain test pattern codes at ~620 kbps whatever the
+            target. Low-latency RC drops whole frames when content can't fit (flag FrameDropped).
+            Encode ~3 ms median at 720p, one frame in flight. LTR: VT marks its own LTRs (~every 2 s
+            when quiet, often around losses, every refresh frame); `ForceLTRRefresh` with
+            `AcknowledgedLTRTokens` gives a P frame (1.15–1.3× size) that decodes bit-identically to
+            a full decode; with no usable acked LTR it sends a keyframe. Acking only the newest LTR
+            fails on back-to-back losses (VT then marks most frames LTR, every loss → keyframe);
+            acking every LTR the receiver decoded works (`ltr3` spike: 0 keyframes).
+            `hevc_vt_encoder.cpp` (default; `--encoder ffmpeg` = FFmpeg's hevc_videotoolbox):
+            low-latency RC, live `AverageBitRate`, LTR recovery (`recoverFrom(good)`: drop LTRs after
+            good, ack the rest, refresh; `refBack` = to the newest acked; cleared on keyframes), VUI
+            colours (BT.709 limited / BT.601 full via the pixel format), Annex B with parameter sets
+            on keyframes, encoder drops use no frame id. `setAnchorInterval` is a no-op (VT picks LTRs).
+            `test_vt_encoder`: ladder sizes incl. 426×240 exact, keyframes on demand, live rate within
+            4%, recovery bit-identical, back-to-back losses (fails on the newest-only logic), colours.
+            `CaptureConfig::patternDetail` (test pattern noise, default 0) so `test_call`'s two CC tests
+            send a real 4 Mbps; bottleneck test now passes (2 Mbps link → 672–960 kbps 540p rungs, 4–6
+            switches; Linux held 1.9 Mbps 720p on a 3 Mbps link — possibly VT's ~1 s settling; open).
+            Calls, Release, 720p30, native vs FFmpeg: clean 4.9/7.7 vs 6.1/9.8 ms avg/p95; MG600L2
+            keyframes 3 vs 4, p95 72 vs 99 ms; 3% loss in bursts of 4, no NACK/FEC, 3 runs: keyframes
+            1,1,1 vs 17,17,27, recoveries 19,18,14 vs 0, video 562–622 vs 896–999 kbps. 1080p60 clean,
+            same sitting: capture→decoded 10.1 vs 9.7 ms avg, p95 12.6 vs 13.6. 11/11 suites; test_call
+            21/21 × 5. Not checked on Linux: `patternDetail` in the two CC tests there.
 
 Also outstanding: active A/V sync (latencies are reported only); the AV1 software encoder bug below.
 

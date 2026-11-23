@@ -80,7 +80,7 @@ int main(int argc, char** argv)
                                        "12000");
     QCommandLineOption cameraFormatOpt("camera-format", "Camera format: auto, mjpeg or nv12.", "fmt", "auto");
     QCommandLineOption decodeOutputOpt("decode-output", "Hardware-decoded video: gpu (shown without a copy) or cpu (read back first).", "where", "gpu");
-    QCommandLineOption encoderOpt("encoder", "Hardware HEVC encoder: native (own VA-API encoder) or ffmpeg (FFmpeg's hevc_vaapi).", "which", "native");
+    QCommandLineOption encoderOpt("encoder", "Hardware HEVC encoder: native (own VA-API / VideoToolbox encoder) or ffmpeg (FFmpeg's hevc_vaapi / hevc_videotoolbox).", "which", "native");
     QCommandLineOption cameraDecodeOpt("camera-decode", "Camera MJPEG decode: auto (hardware if available) or software.", "how", "auto");
     QCommandLineOption audioFecOpt("audio-fec", "Opus loss protection: lbrr (in-band FEC) or dred.", "mode",
                                    "lbrr");
