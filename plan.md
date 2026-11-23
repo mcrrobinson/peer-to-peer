@@ -282,7 +282,7 @@ Congestion control (phase 6), in `MediaTransport` because it sees every packet:
       1080p60, no quality limit, no loss). Caveats: loopback only, no impairment, trivially
       compressible content, one browser; a camera-sourced call has its own capture path in
       place of the canvas.
-- [~] **10 macOS** — AVFoundation camera, ScreenCaptureKit, VideoToolbox (low-latency RC, HEVC),
+- [x] **10 macOS** — AVFoundation camera, ScreenCaptureKit, VideoToolbox (low-latency RC, HEVC),
       CoreAudio via miniaudio, codesign + camera/mic/screen entitlements.
       Steps: (1) builds and calls with what exists; (2) VideoToolbox HEVC encode + decode (native
       VTCompressionSession, low-latency RC, live retarget, recovery refs if VT allows; decode to
@@ -384,6 +384,17 @@ Congestion control (phase 6), in `MediaTransport` because it sees every packet:
             display) skips without the permission — not granted here, so not yet run. Not checked:
             declining the picker (one try: no cancel callback seen; left as is), menu-bar Stop,
             the picker in `--headless` (no NSApplication).
+      - [x] 5 App bundle (2026-11-23). `p2pcall` builds as `p2pcall.app` (`macos/Info.plist.in`:
+            camera / microphone / local network usage strings, macOS 14 minimum for the picker),
+            `codesign` after every link (`P2P_CODESIGN_IDENTITY`, default `-` = ad hoc),
+            `build/<preset>/p2pcall` → the bundle's executable (README / scripts unchanged; replaces
+            the `-sectcreate` Info.plist). Signature valid (`codesign --verify --strict`). From a
+            terminal TCC still asks for the terminal; launched with `open` the app asked for camera
+            access itself and sent 720p30 after Allow. Ad hoc → designated requirement is the
+            cdhash: grants should reset on every rebuild (expected, not tested); a named
+            certificate keeps them (README). Not done: `macdeployqt` (the bundle uses Homebrew's Qt
+            in place — fine on this machine, not distributable), hardened runtime / notarisation
+            (needs a Developer ID), local-network prompt with discovery on (untested).
 
 Also outstanding: active A/V sync (latencies are reported only); the AV1 software encoder bug below.
 

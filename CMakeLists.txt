@@ -144,10 +144,27 @@ if(APPLE)
     # VideoToolbox frames -> Metal textures without a copy (Objective-C++).
     target_sources(p2pcall PRIVATE src/app/metal_nv12_import.h src/app/metal_nv12_import.mm)
     target_link_libraries(p2pcall PRIVATE "-framework Metal" "-framework CoreVideo")
-    # Usage strings for the camera / microphone prompts, embedded in the
-    # executable (a bare binary has no bundle to carry an Info.plist).
-    target_link_options(p2pcall PRIVATE "LINKER:-sectcreate,__TEXT,__info_plist,${CMAKE_SOURCE_DIR}/macos/Info.plist")
-    set_property(TARGET p2pcall APPEND PROPERTY LINK_DEPENDS ${CMAKE_SOURCE_DIR}/macos/Info.plist)
+    # An app bundle: its Info.plist carries the camera / microphone usage
+    # strings, and launched as an app (`open`, Finder) it gets its own
+    # privacy permissions. Run from a terminal, the terminal app is asked.
+    set_target_properties(p2pcall PROPERTIES
+        MACOSX_BUNDLE TRUE
+        MACOSX_BUNDLE_INFO_PLIST ${CMAKE_SOURCE_DIR}/macos/Info.plist.in
+        MACOSX_BUNDLE_GUI_IDENTIFIER dev.p2pcall.p2pcall
+        MACOSX_BUNDLE_BUNDLE_NAME p2pcall
+        MACOSX_BUNDLE_SHORT_VERSION_STRING ${PROJECT_VERSION}
+        MACOSX_BUNDLE_BUNDLE_VERSION ${PROJECT_VERSION})
+    # Signed after every link. "-" is ad hoc: macOS then knows the app by
+    # this exact build, so permissions granted to it don't survive a rebuild.
+    # A code-signing certificate's name here keeps them (see README).
+    set(P2P_CODESIGN_IDENTITY "-" CACHE STRING "codesign identity for p2pcall.app (- = ad hoc)")
+    add_custom_command(TARGET p2pcall POST_BUILD
+        COMMAND codesign --force --sign "${P2P_CODESIGN_IDENTITY}" --identifier dev.p2pcall.p2pcall
+                "$<TARGET_BUNDLE_DIR:p2pcall>"
+        # build/<preset>/p2pcall keeps working (README, scripts).
+        COMMAND ${CMAKE_COMMAND} -E create_symlink "p2pcall.app/Contents/MacOS/p2pcall"
+                "${CMAKE_CURRENT_BINARY_DIR}/p2pcall"
+        VERBATIM)
 endif()
 target_include_directories(p2pcall PRIVATE src/app) # qmltyperegistrar includes headers by bare name
 target_compile_options(p2pcall PRIVATE -Wall -Wextra)
