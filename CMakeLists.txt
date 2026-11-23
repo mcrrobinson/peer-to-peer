@@ -100,8 +100,11 @@ if(CMAKE_SYSTEM_NAME STREQUAL "Linux")
         "-Wno-missing-field-initializers;-Wno-pedantic")
     # Per-pixel colour conversion on the camera path: optimise even in Debug.
     set_source_files_properties(src/video/jpeg_decode.cpp PROPERTIES COMPILE_OPTIONS "-O3")
+elseif(APPLE)
+    target_sources(p2pcore PRIVATE src/video/codec_probe_macos.cpp src/video/camera_none.cpp
+                                   src/video/screen_none.cpp)
+    target_link_libraries(p2pcore PRIVATE "-framework VideoToolbox" "-framework CoreMedia" "-framework CoreFoundation")
 else()
-    # macOS VideoToolbox probe arrives in the macOS port phase.
     target_sources(p2pcore PRIVATE src/video/codec_probe_generic.cpp src/video/camera_none.cpp
                                    src/video/screen_none.cpp)
 endif()
@@ -113,6 +116,9 @@ qt_add_executable(p2pcall src/app/main.cpp)
 qt_add_qml_module(p2pcall
     URI P2PCall
     VERSION 1.0
+    # Not the default build/<dir>/P2PCall: on case-insensitive filesystems
+    # (macOS) that directory collides with the p2pcall executable.
+    OUTPUT_DIRECTORY ${CMAKE_CURRENT_BINARY_DIR}/qml/P2PCall
     QML_FILES qml/Main.qml
     SOURCES src/app/video_view.h src/app/video_view.cpp)
 qt_add_shaders(p2pcall "p2pcall_shaders"

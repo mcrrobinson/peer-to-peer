@@ -3,8 +3,10 @@
 #include "app/call_controller.h"
 #include "net/crypto.h"
 
+#include <QEventLoop>
 #include <QSignalSpy>
 #include <QTest>
+#include <QTimer>
 
 using p2p::app::CallController;
 using State = CallController::State;
@@ -100,7 +102,16 @@ private slots:
         // RTT / clock offset arrive from the ping loop; same host => offset ~0.
         QTRY_VERIFY(a->rttMs() >= 0);
         QVERIFY(a->rttMs() < 50);
-        QVERIFY(std::abs(a->clockOffsetMs()) < 5);
+        // Let the 5-ping burst (500 ms) run under a real event loop: QTRY_*'s
+        // ~10 ms sleeps between event passes delay each leg by a sleep, and on
+        // macOS the two legs' delays differ by up to ~10 ms (offset > 5 ms).
+        {
+            QEventLoop loop;
+            QTimer::singleShot(600, &loop, &QEventLoop::quit);
+            loop.exec();
+        }
+        QVERIFY2(std::abs(a->clockOffsetMs()) < 5,
+                 qPrintable(QStringLiteral("offset %1 ms, rtt %2 ms").arg(a->clockOffsetMs()).arg(a->rttMs())));
 
         QSignalSpy bEnded(b.get(), &CallController::callEnded);
         a->hangup();

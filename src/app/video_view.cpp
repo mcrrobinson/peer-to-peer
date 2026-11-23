@@ -38,6 +38,7 @@ struct Uniforms {
     float matrix[4]; // x Cr->R, y Cb->G, z Cr->G, w Cb->B
 };
 
+#ifdef Q_OS_LINUX
 // Showing GPU frames without a copy (OpenGL on EGL): dma-buf -> EGLImage ->
 // GL texture. The few EGL names needed (EGL_EXT_image_dma_buf_import,
 // EGL_EXT_image_dma_buf_import_modifiers, GL_OES_EGL_image), from the specs.
@@ -122,6 +123,16 @@ private:
     EGLint (*getError_)() = nullptr;
     QString error_;
 };
+#else
+// No dma-buf import off Linux: GPU frames are read back and uploaded.
+class DmaBufImporter {
+public:
+    bool init(QOpenGLContext*) { return false; }
+    bool import(const video::DmaBufNv12&, GLuint*) { return false; }
+    QString error() const { return QStringLiteral("not supported on this platform"); }
+    void release(GLuint* tex) { tex[0] = tex[1] = 0; }
+};
+#endif
 
 void setColour(Uniforms& u, video::Colour c)
 {

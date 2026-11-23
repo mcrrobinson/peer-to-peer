@@ -38,7 +38,7 @@ Opus DRED needs a libopus built with it: `tools/build-opus-dred.sh`, then re-run
       (need a native VA-API encoder backend).
 - [x] Phase 6: transport-wide feedback (arrival times + ECN), SCReAM-v2-style delay/L4S controller, pacing
       only when the link is the bottleneck, encoder bitrate/resolution ladder, FEC driven by the controller.
-- [ ] Phase 7: screen share · 8: AV1 · 9: latency work · 10: macOS
+- [ ] Phase 7: screen share · 8: AV1 · 9: latency work · 10: macOS (in progress: builds and calls; see plan.md)
 
 ## Layout
 `src/net` (crypto, control channel, discovery, media transport, FEC, `cc/` congestion control) · `src/media` (codec caps/negotiation) ·

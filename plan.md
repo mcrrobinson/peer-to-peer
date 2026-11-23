@@ -12,13 +12,17 @@ encrypted from day one.
 - Commit only when asked.
 - Testing is on **one machine**: two instances (`--instance 1`, `--instance 2`). Only one can
   hold the camera; give the other `--video-source pattern`.
-- Browser automation (if ever needed): use the local Linux Chrome, never the macOS one.
+- Browser automation (if ever needed): on the Linux machine, use the local Linux Chrome, never the macOS one.
 
 ## Dev machine
 Debian 13, kernel 6.12, 12 cores, AMD RX 5700 XT (Navi 10, Mesa radeonsi). VA-API: HEVC
 Main/Main10 encode + decode, JPEG decode; **no AV1 hardware** (AV1 = SVT-AV1 encode, dav1d
 decode). Qt 6.8.2, FFmpeg 7.1, libsodium, miniaudio, webrtc-audio-processing-1. Camera:
 Logitech StreamCam `/dev/video0` (60 fps only as MJPEG; NV12 ≤ 30 fps).
+
+macOS (phase 10): MacBook Air M3, 16 GB, macOS 26.2, Command Line Tools only (no Xcode), Homebrew:
+`qt` 6.12, `ninja`, `miniaudio`, `ffmpeg` 9.0 (x265, SVT-AV1, dav1d, VideoToolbox), `libsodium`, `opus` 1.6.
+No webrtc-audio-processing formula (AEC is parked anyway). Same presets; Qt picks the Metal RHI backend.
 
 ## Build / run / test
 ```sh
@@ -278,9 +282,25 @@ Congestion control (phase 6), in `MediaTransport` because it sees every packet:
       1080p60, no quality limit, no loss). Caveats: loopback only, no impairment, trivially
       compressible content, one browser; a camera-sourced call has its own capture path in
       place of the canvas.
-- [ ] **10 macOS** — AVFoundation camera, ScreenCaptureKit, VideoToolbox (low-latency RC, HEVC),
-      CoreAudio via miniaudio, codesign + camera/mic/screen entitlements. Platform splits exist
-      (`camera_none.cpp`, `codec_probe_generic.cpp`, `audio_device_none.cpp`).
+- [~] **10 macOS** — AVFoundation camera, ScreenCaptureKit, VideoToolbox (low-latency RC, HEVC),
+      CoreAudio via miniaudio, codesign + camera/mic/screen entitlements.
+      Steps: (1) builds and calls with what exists; (2) VideoToolbox HEVC encode + decode (native
+      VTCompressionSession, low-latency RC, live retarget, recovery refs if VT allows; decode to
+      IOSurface → Metal without a copy); (3) AVFoundation camera; (4) ScreenCaptureKit; (5) app
+      bundle, Info.plist usage strings, ad-hoc codesign, TCC permissions.
+      - [x] 1 Builds and runs (2026-11-23). EGL dma-buf import is Linux-only (`video_view.cpp`
+            stub elsewhere: upload path); `codec_probe_macos.cpp` advertises HEVC hw encode when VT
+            lists a hardware HEVC encoder (FFmpeg `hevc_videotoolbox` for now), decoders software
+            only. Without it the software-only probe picked AV1 and hit the SVT-AV1 bug below.
+            Headless pair, pattern 1080p60, Release: 60 fps both ways, capture→decoded 7.7 ms avg,
+            software HEVC decode 1.4 ms; control RTT 0.1–0.3 ms. GUI: Metal backend, both views draw.
+            Debug build: pattern prep ~17 ms/frame caps the pattern at ~30 fps at 1080p (−O0).
+            Tests 9/10 suites; `test_call` fails only `congestionControlAdaptsToBottleneck`:
+            `hevc_videotoolbox` runs well under its target (4 Mbps set, ~600–700 kbps out on the
+            pattern) so the 2 Mbps link never congests. VT rejects `constant_bit_rate` for HEVC on
+            M3 ("not supported by the encoder"). Expected to be fixed by step 2. Seen once each,
+            not reproduced in 5 later runs: `windowFecRepairsWithoutResends`,
+            `congestionControlStaysOutOfTheWayOnLan` (first probably load from GUI instances).
 
 Also outstanding: active A/V sync (latencies are reported only); the AV1 software encoder bug below.
 
@@ -302,3 +322,8 @@ Also outstanding: active A/V sync (latencies are reported only); the AV1 softwar
   `IP_TOS` cmsg can set CE, and `IP_RECVTOS` on the dual-stack socket reports it for v4-mapped peers.
 - **Bug for phase 8:** `libsvtav1` (2.3) refuses to open with `rc_max_rate` set ("Max Bitrate only
   supported with CRF mode"), so AV1 software encode (`--prefer-av1`) currently fails. Pre-existing.
+- macOS: the filesystem is case-insensitive, so the QML module's default output dir `build/dev/P2PCall`
+  collided with the `p2pcall` executable (ld: "Is a directory"); the module now builds into `qml/P2PCall`.
+- macOS: `QTRY_*` / `qWait` sleep ~10 ms between event passes; with both peers in one thread each
+  control-channel leg waits out a sleep (~12.7 ms on macOS) and the legs differ by up to ~10 ms, so
+  the clock-offset check now runs the ping burst under a real `QEventLoop`.
