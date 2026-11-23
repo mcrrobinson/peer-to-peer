@@ -156,6 +156,30 @@ private slots:
         QVERIFY2(dropped > 400 && dropped < 600, qPrintable(QString::number(dropped)));
         QTRY_COMPARE(p.rxB.size(), size_t(1000 - dropped));
     }
+
+    // Another program's socket on 127.0.0.1:port would get our loopback
+    // datagrams. The dual-stack bind refuses that port on Linux and, as long
+    // as the socket doesn't set SO_REUSEADDR, on macOS too (with it, macOS
+    // allows the bind: see net/port_check.h and the control channel).
+    void refusesPortHeldOnLoopback()
+    {
+        const int other = ::socket(AF_INET, SOCK_DGRAM, 0);
+        QVERIFY(other >= 0);
+        sockaddr_in sa{};
+        sa.sin_family = AF_INET;
+        sa.sin_addr.s_addr = htonl(INADDR_LOOPBACK);
+        QCOMPARE(::bind(other, reinterpret_cast<sockaddr*>(&sa), sizeof(sa)), 0);
+        socklen_t len = sizeof(sa);
+        ::getsockname(other, reinterpret_cast<sockaddr*>(&sa), &len);
+        const uint16_t port = ntohs(sa.sin_port);
+        MediaTransport t;
+        QString err;
+        QVERIFY2(!t.open(port, &err), "bound a port another socket holds on 127.0.0.1");
+        qInfo("refused: %s", qPrintable(err));
+        MediaTransport any; // port 0 still works
+        QVERIFY(any.open(0, &err));
+        ::close(other);
+    }
 };
 
 QTEST_GUILESS_MAIN(TestTransport)

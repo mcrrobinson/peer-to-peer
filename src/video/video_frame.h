@@ -34,7 +34,8 @@ struct DmaBufNv12 {
 // (no conversion on the send path); everything else is BT.709 limited.
 enum class Colour : uint8_t { Bt709Limited, Bt601Full };
 
-// A frame that lives on the GPU (Linux: a VA-API surface). The encoder takes
+// A frame that lives on the GPU (Linux: a VA-API surface; macOS: a
+// VideoToolbox CVPixelBuffer). The VA-API encoder takes
 // it as is; CPU readers call VideoFrame::ensureCpu(), which downloads once.
 class GpuImage {
 public:
@@ -48,6 +49,9 @@ public:
     // The picture (at its own size) as dma-bufs, exported once and kept
     // while the image lives; nullptr if not possible. Thread-safe.
     virtual const DmaBufNv12* dmaBuf() { return nullptr; }
+    // macOS: the picture as an NV12 CVPixelBufferRef (IOSurface-backed),
+    // owned by this image; nullptr if it isn't one.
+    virtual void* cvPixelBuffer() { return nullptr; }
 
 private:
     friend struct VideoFrame;

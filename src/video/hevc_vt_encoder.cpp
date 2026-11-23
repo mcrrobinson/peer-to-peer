@@ -15,7 +15,7 @@
 #include <optional>
 #include <vector>
 
-Q_LOGGING_CATEGORY(lcVt, "p2p.encoder.vt")
+Q_LOGGING_CATEGORY(lcVt, "p2p.encoder.vt", QtInfoMsg)
 
 namespace p2p::video {
 

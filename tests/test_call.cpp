@@ -5,6 +5,7 @@
 
 #include <QEventLoop>
 #include <QSignalSpy>
+#include <QTcpServer>
 #include <QTest>
 #include <QTimer>
 
@@ -244,6 +245,9 @@ private slots:
             QTRY_VERIFY(b->mediaSession() && a->mediaSession());
             QTRY_VERIFY_WITH_TIMEOUT(b->mediaSession()->videoRecvStats()->decoded >= frames, 15000);
         }();
+        // A failed wait only leaves the lambda: without a call there are no
+        // stats to read (this used to crash the whole suite).
+        if (QTest::currentTestFailed() || !a->mediaSession() || !b->mediaSession()) return {};
         const auto rx = *b->mediaSession()->videoRecvStats();
         const auto tx = *a->mediaSession()->videoSendStats();
         qInfo("%s: path loss %.1f%%, decoded %llu (recovered %llu: fec frags %llu, resent useful %llu), "
@@ -473,6 +477,22 @@ private slots:
         a->callAddress("127.0.0.1:1"); // nothing listens on port 1
         QTRY_COMPARE(a->state(), State::Idle);
         QVERIFY(a->lastError().contains("connect"));
+    }
+
+    // Another program listening on 127.0.0.1:port would take our loopback
+    // calls (macOS lets the dual-stack listen succeed): refuse the port.
+    void refusesPortHeldOnLoopback()
+    {
+        QTcpServer other;
+        QVERIFY(other.listen(QHostAddress::LocalHost, 0));
+        CallController::Options o;
+        o.name = QStringLiteral("alice");
+        o.port = other.serverPort();
+        o.discovery = false;
+        o.caps = navi10Caps();
+        CallController c(o);
+        QVERIFY2(!c.start(), "listened on a port another program holds on 127.0.0.1");
+        qInfo("refused: %s", qPrintable(c.lastError()));
     }
 
     void badAddress()

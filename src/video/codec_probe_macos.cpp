@@ -52,15 +52,18 @@ media::MediaCaps probeLocalCaps()
     qCInfo(lcProbe) << "VideoToolbox: HEVC enc/dec" << hevcEnc << hevcDec << "AV1 dec" << av1Dec;
 
     media::MediaCaps caps;
-    // Hardware encode goes through FFmpeg's hevc_videotoolbox for now.
+    // Hardware encode: our VideoToolbox encoder (hevc_vt_encoder.h), FFmpeg's
+    // hevc_videotoolbox as the fallback.
     if (hevcEnc && haveEncoder("hevc_videotoolbox")) caps.encoders.append({Codec::HEVC, true, kHwMaxW, kHwMaxH});
     if (haveEncoder("libsvtav1")) caps.encoders.append({Codec::AV1, false, kSwMaxW, kSwMaxH});
     if (haveEncoder("libx265")) caps.encoders.append({Codec::HEVC, false, kSwMaxW, kSwMaxH});
 
-    // Decoding is software until the decoder gets a VideoToolbox path, so
-    // hardware decode is not advertised yet.
+    // HEVC decode: FFmpeg's hevc decoder with the VideoToolbox hwaccel.
+    // AV1 stays software (the hwaccel path isn't wired up for AV1).
+    const bool hevcDecoder = haveDecoder("hevc");
+    if (hevcDec && hevcDecoder) caps.decoders.append({Codec::HEVC, true, kHwMaxW, kHwMaxH});
     if (haveDecoder("libdav1d")) caps.decoders.append({Codec::AV1, false, kSwMaxW, kSwMaxH});
-    if (haveDecoder("hevc")) caps.decoders.append({Codec::HEVC, false, kSwMaxW, kSwMaxH});
+    if (hevcDecoder) caps.decoders.append({Codec::HEVC, false, kSwMaxW, kSwMaxH});
 
     qCInfo(lcProbe).noquote() << "local caps:" << caps.summary();
     return caps;

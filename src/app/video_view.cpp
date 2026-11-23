@@ -1,6 +1,9 @@
 #include "app/video_view.h"
 
 #include "core/clock.h"
+#ifdef Q_OS_MACOS
+#include "app/metal_nv12_import.h"
+#endif
 
 #include <QQuickWindow>
 
@@ -171,6 +174,9 @@ private:
     std::unique_ptr<QRhiTexture> extY_, extUV_;    // imported (zero-copy) frames, wrapping glTex_
     GLuint glTex_[2] = {0, 0};
     DmaBufImporter importer_;
+#ifdef Q_OS_MACOS
+    std::unique_ptr<MetalNv12Importer> metal_; // VideoToolbox frames on the Metal backend
+#endif
     bool importTried_ = false, importOk_ = false;
     bool showingImported_ = false;
     QRhiTexture* boundY_ = nullptr;
@@ -205,6 +211,9 @@ void VideoRenderer::initialize(QRhiCommandBuffer*)
         extUV_.reset();
         glTex_[0] = glTex_[1] = 0; // went with the old context
         importTried_ = importOk_ = showingImported_ = false;
+#ifdef Q_OS_MACOS
+        metal_.reset(); // its texture cache belongs to the old device
+#endif
         boundY_ = nullptr;
         vbufUploaded_ = false;
         vbuf_.reset(rhi_->newBuffer(QRhiBuffer::Immutable, QRhiBuffer::VertexBuffer, sizeof(kQuad)));
@@ -240,9 +249,48 @@ bool VideoRenderer::importFrame()
             auto* h = static_cast<const QRhiGles2NativeHandles*>(rhi_->nativeHandles());
             importOk_ = h && rhi_->makeThreadLocalNativeContextCurrent() && importer_.init(h->context);
         }
+#ifdef Q_OS_MACOS
+        if (rhi_->backend() == QRhi::Metal) {
+            auto* h = static_cast<const QRhiMetalNativeHandles*>(rhi_->nativeHandles());
+            metal_ = std::make_unique<MetalNv12Importer>();
+            if (!h || !metal_->init(h->dev)) metal_.reset();
+            qInfo("video view: %s", metal_ ? "GPU frames shown without a copy (CVPixelBuffer -> Metal texture)"
+                                             : "GPU frames are read back and uploaded (no Metal texture cache)");
+        } else
+#endif
         qInfo("video view: %s", importOk_ ? "GPU frames shown without a copy (dma-buf -> EGLImage)"
                                           : "GPU frames are read back and uploaded (no EGL dma-buf import)");
     }
+#ifdef Q_OS_MACOS
+    if (metal_ && frame_->gpu) {
+        void* pb = frame_->gpu->cvPixelBuffer();
+        uint64_t tex[2] = {0, 0};
+        if (!pb || !metal_->import(pb, frame_->width, frame_->height, tex)) {
+            static bool warned = false;
+            if (!warned)
+                qWarning("video view: Metal import failed (%s); uploading instead",
+                         pb ? qPrintable(metal_->error()) : "not a CVPixelBuffer");
+            warned = true;
+            return false;
+        }
+        // A new native texture every frame (the buffer changes): re-wrap.
+        // The bindings pick up the rebuilt textures by themselves.
+        const QSize size(frame_->width, frame_->height);
+        if (!extY_) {
+            extY_.reset(rhi_->newTexture(QRhiTexture::R8, size));
+            extUV_.reset(rhi_->newTexture(QRhiTexture::RG8, size / 2));
+        }
+        extY_->setPixelSize(size);
+        extUV_->setPixelSize(size / 2);
+        if (!extY_->createFrom({tex[0], 0}) || !extUV_->createFrom({tex[1], 0})) {
+            extY_.reset();
+            extUV_.reset();
+            boundY_ = nullptr;
+            return false;
+        }
+        return true;
+    }
+#endif
     if (!importOk_ || !frame_->gpu) return false;
     const video::DmaBufNv12* d = frame_->gpu->dmaBuf();
     if (!d || !rhi_->makeThreadLocalNativeContextCurrent() || !importer_.import(*d, glTex_)) {

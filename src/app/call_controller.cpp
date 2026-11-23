@@ -2,6 +2,7 @@
 
 #include "net/control_channel.h"
 #include "net/discovery.h"
+#include "net/port_check.h"
 
 #include <QDateTime>
 #include <algorithm>
@@ -83,9 +84,21 @@ CallController::~CallController() = default;
 
 bool CallController::start()
 {
-    if (!server_.listen(QHostAddress::Any, opts_.port)) {
-        setError(QStringLiteral("cannot listen on port %1: %2").arg(opts_.port).arg(server_.errorString()));
-        return false;
+    // A port another program holds on 127.0.0.1 would take our loopback
+    // connections (macOS allows the bind): pick another one, or fail like a
+    // port in use.
+    for (int attempt = 0;; ++attempt) {
+        if (!server_.listen(QHostAddress::Any, opts_.port)) {
+            setError(QStringLiteral("cannot listen on port %1: %2").arg(opts_.port).arg(server_.errorString()));
+            return false;
+        }
+        if (!net::loopbackPortShadowed(server_.serverPort(), false)) break;
+        const quint16 taken = server_.serverPort();
+        server_.close();
+        if (opts_.port != 0 || attempt == 7) {
+            setError(QStringLiteral("cannot listen on port %1: another program holds it on 127.0.0.1").arg(taken));
+            return false;
+        }
     }
     appendLog(QStringLiteral("listening on port %1").arg(server_.serverPort()));
     appendLog(QStringLiteral("local codecs: %1").arg(opts_.caps.summary()));

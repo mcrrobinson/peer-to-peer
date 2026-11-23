@@ -33,6 +33,7 @@ add_library(p2pcore STATIC
     src/net/discovery.h         src/net/discovery.cpp
     src/net/media_transport.h   src/net/media_transport.cpp
     src/net/fec.h                 src/net/fec.cpp
+    src/net/port_check.h          src/net/port_check.cpp
     src/net/cc/transport_feedback.h    src/net/cc/transport_feedback.cpp
     src/net/cc/congestion_controller.h src/net/cc/congestion_controller.cpp
     src/audio/jitter_buffer.h   src/audio/jitter_buffer.cpp
@@ -133,6 +134,12 @@ if(NOT TARGET Qt6::GuiPrivate)
     find_package(Qt6 REQUIRED COMPONENTS GuiPrivate)
 endif()
 target_link_libraries(p2pcall PRIVATE p2pcore Qt6::Gui Qt6::GuiPrivate Qt6::Quick)
+if(APPLE)
+    # VideoToolbox frames -> Metal textures without a copy (Objective-C++).
+    enable_language(OBJCXX)
+    target_sources(p2pcall PRIVATE src/app/metal_nv12_import.h src/app/metal_nv12_import.mm)
+    target_link_libraries(p2pcall PRIVATE "-framework Metal" "-framework CoreVideo")
+endif()
 target_include_directories(p2pcall PRIVATE src/app) # qmltyperegistrar includes headers by bare name
 target_compile_options(p2pcall PRIVATE -Wall -Wextra)
 
@@ -162,5 +169,12 @@ if(P2P_BUILD_TESTS)
         qt_add_executable(test_vt_encoder tests/test_vt_encoder.cpp)
         target_link_libraries(test_vt_encoder PRIVATE p2pcore Qt6::Test)
         add_test(NAME test_vt_encoder COMMAND test_vt_encoder)
+        # Renderer on Metal: imported VideoToolbox frames vs uploaded ones (opens a window).
+        qt_add_executable(test_video_view tests/test_video_view.cpp src/app/video_view.h src/app/video_view.cpp
+                          src/app/metal_nv12_import.h src/app/metal_nv12_import.mm)
+        qt_add_shaders(test_video_view "test_video_view_shaders" PREFIX "/" FILES shaders/nv12.vert shaders/nv12.frag)
+        target_link_libraries(test_video_view PRIVATE p2pcore Qt6::Test Qt6::Gui Qt6::GuiPrivate Qt6::Quick
+                              "-framework Metal" "-framework CoreVideo")
+        add_test(NAME test_video_view COMMAND test_video_view)
     endif()
 endif()

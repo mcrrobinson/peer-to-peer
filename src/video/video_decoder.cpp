@@ -1,6 +1,8 @@
 #include "video/video_decoder.h"
 
-#ifndef __APPLE__
+#ifdef __APPLE__
+#include <CoreVideo/CoreVideo.h>
+#else
 #include "video/vaapi_device.h"
 #endif
 
@@ -80,10 +82,45 @@ private:
 };
 #endif
 
-AVPixelFormat pickVaapi(AVCodecContext*, const AVPixelFormat* fmts)
+#ifdef __APPLE__
+// A VideoToolbox-decoded frame: an NV12 CVPixelBuffer (IOSurface), shown
+// by the Metal renderer without a copy.
+class DecodedImage : public GpuImage {
+public:
+    explicit DecodedImage(AVFrame* f) : frame_(f) {}
+    ~DecodedImage() override { av_frame_free(&frame_); }
+    void* nv12Surface(int, int) override { return nullptr; }
+    void* cvPixelBuffer() override { return frame_->data[3]; }
+    bool download(VideoFrame& f) override
+    {
+        auto pb = reinterpret_cast<CVPixelBufferRef>(frame_->data[3]);
+        if (CVPixelBufferGetPlaneCount(pb) != 2 || CVPixelBufferLockBaseAddress(pb, kCVPixelBufferLock_ReadOnly) != kCVReturnSuccess)
+            return false;
+        for (size_t p = 0; p < 2; ++p) {
+            const auto* src = static_cast<const uint8_t*>(CVPixelBufferGetBaseAddressOfPlane(pb, p));
+            const size_t stride = CVPixelBufferGetBytesPerRowOfPlane(pb, p);
+            uint8_t* dst = p ? f.uv() : f.y();
+            for (int r = 0; r < (p ? f.height / 2 : f.height); ++r)
+                std::memcpy(dst + size_t(r) * size_t(f.width), src + size_t(r) * stride, size_t(f.width));
+        }
+        CVPixelBufferUnlockBaseAddress(pb, kCVPixelBufferLock_ReadOnly);
+        return true;
+    }
+
+private:
+    AVFrame* frame_;
+};
+constexpr AVPixelFormat kHwFormat = AV_PIX_FMT_VIDEOTOOLBOX;
+constexpr AVHWDeviceType kHwDevice = AV_HWDEVICE_TYPE_VIDEOTOOLBOX;
+#else
+constexpr AVPixelFormat kHwFormat = AV_PIX_FMT_VAAPI;
+constexpr AVHWDeviceType kHwDevice = AV_HWDEVICE_TYPE_VAAPI;
+#endif
+
+AVPixelFormat pickHw(AVCodecContext*, const AVPixelFormat* fmts)
 {
     for (const AVPixelFormat* p = fmts; *p != AV_PIX_FMT_NONE; ++p)
-        if (*p == AV_PIX_FMT_VAAPI) return *p;
+        if (*p == kHwFormat) return *p;
     return fmts[0]; // hwaccel unusable for this stream: software fallback
 }
 } // namespace
@@ -116,8 +153,12 @@ bool VideoDecoder::hardware() const { return d->hw; }
 void VideoDecoder::setGpuFrames(bool on) { gGpuFrames = on; }
 QString VideoDecoder::name() const
 {
-    return d->codec ? QString::fromLatin1(d->codec->name) + (d->hw ? QStringLiteral(" (vaapi)") : QString())
-                    : QStringLiteral("none");
+#ifdef __APPLE__
+    const auto hwName = QStringLiteral(" (videotoolbox)");
+#else
+    const auto hwName = QStringLiteral(" (vaapi)");
+#endif
+    return d->codec ? QString::fromLatin1(d->codec->name) + (d->hw ? hwName : QString()) : QStringLiteral("none");
 }
 
 bool VideoDecoder::init(media::Codec codec, bool preferHardware, QString* error)
@@ -133,16 +174,14 @@ bool VideoDecoder::init(media::Codec codec, bool preferHardware, QString* error)
     AVCodecContext* c = d->ctx = avcodec_alloc_context3(d->codec);
     c->flags |= AV_CODEC_FLAG_LOW_DELAY;
 
-#ifndef __APPLE__
-    if (preferHardware && av_hwdevice_ctx_create(&d->device, AV_HWDEVICE_TYPE_VAAPI, nullptr, nullptr, 0) == 0) {
+    if (preferHardware && av_hwdevice_ctx_create(&d->device, kHwDevice, nullptr, nullptr, 0) == 0) {
         c->hw_device_ctx = av_buffer_ref(d->device);
-        c->get_format = pickVaapi;
+        c->get_format = pickHw;
         // Frames held downstream (latest in the hub, the one on screen, the
         // one before it) must not starve the decoder's surface pool.
         c->extra_hw_frames = 4;
         d->hw = true;
     }
-#endif
     if (!d->hw) {
         c->thread_count = 4;
         c->thread_type = FF_THREAD_SLICE;
@@ -204,8 +243,20 @@ std::shared_ptr<VideoFrame> VideoDecoder::decode(const uint8_t* data, size_t siz
             av_frame_unref(d->frame);
             continue;
         }
+#else
+        if (d->frame->format == AV_PIX_FMT_VIDEOTOOLBOX && gGpuFrames) {
+            // VideoToolbox decodes synchronously in FFmpeg: the picture is done.
+            auto f = std::make_shared<VideoFrame>();
+            f->width = w & ~1;
+            f->height = h & ~1;
+            f->colour = colour;
+            f->gpu = std::make_shared<DecodedImage>(av_frame_clone(d->frame));
+            out = std::move(f);
+            av_frame_unref(d->frame);
+            continue;
+        }
 #endif
-        if (d->frame->format == AV_PIX_FMT_VAAPI) {
+        if (d->frame->format == kHwFormat) {
             av_frame_unref(d->swFrame);
             d->swFrame->format = AV_PIX_FMT_NV12;
             if (av_hwframe_transfer_data(d->swFrame, d->frame, 0) < 0) {

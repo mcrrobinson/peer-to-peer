@@ -250,6 +250,55 @@ private slots:
         QCOMPARE(keyframes, 1);
     }
 
+    // VideoToolbox decode (FFmpeg hwaccel): frames stay on the GPU as
+    // CVPixelBuffers and read back identical to the software decoder's
+    // (HEVC decoding is exact), at the picture size, in the stream's colours.
+    void hardwareDecoderMatchesSoftware_data()
+    {
+        QTest::addColumn<int>("w");
+        QTest::addColumn<int>("h");
+        QTest::addColumn<int>("colour");
+        QTest::newRow("1280x720") << 1280 << 720 << int(Colour::Bt709Limited);
+        QTest::newRow("426x240") << 426 << 240 << int(Colour::Bt709Limited);
+        QTest::newRow("640x360 BT.601 full") << 640 << 360 << int(Colour::Bt601Full);
+    }
+    void hardwareDecoderMatchesSoftware()
+    {
+        QFETCH(int, w);
+        QFETCH(int, h);
+        QFETCH(int, colour);
+        VideoEncoder enc;
+        if (!openNative(enc, w, h, 2000, Colour(colour))) QSKIP("no native VideoToolbox HEVC encoder");
+        VideoDecoder hw, sw;
+        QString why;
+        QVERIFY(hw.init(p2p::media::Codec::HEVC, true, &why));
+        if (!hw.hardware()) QSKIP("no VideoToolbox HEVC decoder");
+        QVERIFY(sw.init(p2p::media::Codec::HEVC, false, &why));
+        int frames = 0;
+        for (int i = 0; i < 30; ++i) {
+            VideoFrame f;
+            f.allocate(w & ~1, h & ~1);
+            f.colour = Colour(colour);
+            pattern(f, i);
+            std::vector<uint8_t> bits;
+            QVERIFY(enc.encode(f, i == 0, [&](const uint8_t* d, size_t n, bool) { bits.insert(bits.end(), d, d + n); }));
+            if (bits.empty()) continue;
+            bool err = false;
+            auto a = hw.decode(bits.data(), bits.size(), &err);
+            QVERIFY(a && !err);
+            auto b = sw.decode(bits.data(), bits.size(), &err);
+            QVERIFY(b && !err);
+            QVERIFY(a->gpu && a->gpu->cvPixelBuffer());
+            QCOMPARE(a->width, w & ~1);
+            QCOMPARE(a->height, h & ~1);
+            QCOMPARE(int(a->colour), colour);
+            QVERIFY(a->ensureCpu() && b->ensureCpu());
+            QVERIFY2(a->data == b->data, qPrintable(QStringLiteral("frame %1 differs").arg(i)));
+            ++frames;
+        }
+        QVERIFY(frames >= 28);
+    }
+
     void signalsColours()
     {
         for (Colour c : {Colour::Bt709Limited, Colour::Bt601Full}) {

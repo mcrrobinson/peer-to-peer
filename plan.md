@@ -301,7 +301,7 @@ Congestion control (phase 6), in `MediaTransport` because it sees every packet:
             M3 ("not supported by the encoder"). Expected to be fixed by step 2. Seen once each,
             not reproduced in 5 later runs: `windowFecRepairsWithoutResends`,
             `congestionControlStaysOutOfTheWayOnLan` (first probably load from GUI instances).
-      - [~] 2 VideoToolbox. **Encoder done** (2026-11-23), decoder next.
+      - [x] 2 VideoToolbox encoder + decoder (2026-11-23).
             Spike (M3, HEVC, hardware): `EnableLowLatencyRateControl` works for HEVC;
             `ConstantBitRate`, `MaxFrameDelayCount`, `PrioritizeEncodingSpeedOverQuality` unsupported;
             `EnableLTR`, `DataRateLimits`, Min/MaxAllowedFrameQP supported. 720p30 with detail,
@@ -330,6 +330,26 @@ Congestion control (phase 6), in `MediaTransport` because it sees every packet:
             1,1,1 vs 17,17,27, recoveries 19,18,14 vs 0, video 562–622 vs 896–999 kbps. 1080p60 clean,
             same sitting: capture→decoded 10.1 vs 9.7 ms avg, p95 12.6 vs 13.6. 11/11 suites; test_call
             21/21 × 5. Not checked on Linux: `patternDetail` in the two CC tests there.
+            Decoder: FFmpeg's hevc decoder with the VideoToolbox hwaccel (synchronous); frames stay
+            CVPixelBuffers (`GpuImage::cvPixelBuffer()`, CPU readers lock and copy); probe now
+            advertises HEVC hw decode (AV1 stays software). Bit-identical to the software decoder
+            (720p, 426×240, BT.601 full). Renderer on Metal: `metal_nv12_import.mm` wraps Y/UV as
+            R8/RG8 MTLTextures via CVMetalTextureCache (4 imports kept alive), `createFrom` per frame;
+            falls back to upload. `test_video_view` (Apple, opens a window): grab of the imported frame
+            == grab of the same picture uploaded (0.000 mean diff; another frame differs by 20–32), no
+            read-back, no fallback warning. Render-thread cost per new remote frame, 1080p60: 0.05 ms
+            zero-copy vs 0.76–0.82 ms read-back + upload (`--decode-output cpu`), decode stage 1.9 vs
+            2.2 ms. End-to-end display wait can't show it: 60 fps source vs 60 Hz display is
+            unsynchronised, so decoded→swap is set by the phase (2–20 ms, random per run, either mode);
+            two GUI windows at the same spot also throttle the hidden one (use `-qwindowgeometry`).
+            Clean-call LTR cadence at 60 fps: every 241 frames.
+            Fixed on the way: (a) macOS lets a dual-stack listen succeed on a port another program
+            holds on 127.0.0.1 (QTcpServer sets SO_REUSEADDR); loopback calls then went to that
+            program ("frame too large", seen once in test_call: another local tool listened on the
+            port). `net/port_check` probe; CallController retries port 0 / refuses a fixed port.
+            The UDP media socket has no SO_REUSEADDR, so macOS already refuses there (test added).
+            (b) test_call's `runImpaired` read null stats after a failed call wait and crashed the
+            suite (any platform); it now returns early. 12/12 suites, test_call 22/22 × 3.
 
 Also outstanding: active A/V sync (latencies are reported only); the AV1 software encoder bug below.
 
