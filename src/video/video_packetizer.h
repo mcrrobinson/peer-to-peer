@@ -28,7 +28,7 @@ namespace p2p::video {
 //
 // The whole frame is sent as one burst (no pacing on a LAN).
 struct FragmentHeader {
-    static constexpr size_t kSize = 24;
+    static constexpr size_t kSize = 26;
     // kTestPattern: the sender's source is the synthetic pattern, so the
     // receiver can verify the frame number embedded in the pixels.
     // kRetransmit: a resend in answer to a NACK.
@@ -43,6 +43,9 @@ struct FragmentHeader {
     uint16_t width = 0, height = 0; // 0 = unknown
     uint8_t fecParity = 0;          // parity fragments per block, 0 = no FEC
     uint8_t fecBlock = 0;
+    // Capture -> encoder output on the sender, in 10 us units (latency
+    // breakdown); saturates at 0xffff.
+    uint16_t encodeDelay10Us = 0;
 
     bool isParity() const { return index >= count; }
     int blocks() const { return fecParity ? (count + fecBlock - 1) / fecBlock : 0; }
@@ -57,6 +60,7 @@ struct PacketizeOptions {
     // block gets ceil(blockSize * fecRate) parity fragments.
     double fecRate = 0.0;
     int fecBlockSize = 32;
+    int64_t encodedUs = 0; // when the encoder produced the frame (0 = unknown), sender clock
 };
 
 // Calls |emit| once per fragment with a complete payload (header + data):
@@ -74,6 +78,7 @@ struct AssembledFrame {
     uint8_t codec = 0;
     uint16_t width = 0, height = 0;
     int64_t captureUs = 0;
+    int64_t encodedUs = 0; // sender clock, 0 = unknown
     int64_t firstArrivalUs = 0;
     int64_t completeUs = 0;
     bool recovered = false; // needed FEC or retransmission

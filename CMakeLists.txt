@@ -50,6 +50,8 @@ add_library(p2pcore STATIC
     src/video/video_encoder.h     src/video/video_encoder.cpp
     src/video/video_decoder.h     src/video/video_decoder.cpp
     src/video/rate_ladder.h       src/video/rate_ladder.cpp
+    src/video/latency_stages.cpp
+    src/video/flash_source.cpp
     src/video/video_stream.h      src/video/video_stream.cpp
     src/app/call_controller.h   src/app/call_controller.cpp
 )
@@ -124,6 +126,11 @@ target_compile_options(p2pcall PRIVATE -Wall -Wextra)
 # ---------------------------------------------------------------------------
 # Tests
 # ---------------------------------------------------------------------------
+# Glass-to-glass latency probe (tools/latency_probe/main.cpp).
+qt_add_executable(latency_probe tools/latency_probe/main.cpp)
+target_link_libraries(latency_probe PRIVATE p2pcore Qt6::Gui)
+target_compile_options(latency_probe PRIVATE -O2) # the analysis is a brute-force lag search
+
 if(P2P_BUILD_TESTS)
     enable_testing()
     foreach(t test_crypto test_negotiation test_jitter_buffer test_drift_resampler test_transport test_fec test_video_packetizer test_congestion test_call)

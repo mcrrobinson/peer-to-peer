@@ -461,7 +461,13 @@ private:
         }
         auto f = std::make_shared<VideoFrame>();
         f->allocate(w, hgt);
+        // The compositor's frame time (CLOCK_MONOTONIC ns, the clock nowUs()
+        // uses) when it looks sane; else when we got the buffer.
         f->captureUs = now;
+        if (h && h->pts > 0) {
+            const int64_t pts = h->pts / 1000;
+            if (pts <= now && now - pts < 200'000) f->captureUs = pts;
+        }
         f->id = frameNo_++;
         const uint8_t* src[1] = {static_cast<const uint8_t*>(d.data) + d.chunk->offset};
         const int srcStride[1] = {d.chunk->stride ? int(d.chunk->stride) : srcW_ * 4};
@@ -497,6 +503,7 @@ private:
                     // refine it and answers keyframe requests).
                     f = std::make_shared<VideoFrame>(*last_);
                     f->captureUs = nowUs();
+                    f->repeated = true;
                     f->id = frameNo_++;
                     repeatNow_ = false;
                     lastDeliveredUs_ = f->captureUs;

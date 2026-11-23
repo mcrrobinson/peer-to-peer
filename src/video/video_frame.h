@@ -1,9 +1,12 @@
 #pragma once
 
+#include "video/latency_stages.h"
+
 #include <QObject>
 #include <QString>
 
 #include <cstdint>
+#include <deque>
 #include <map>
 #include <memory>
 #include <mutex>
@@ -17,6 +20,8 @@ struct VideoFrame {
     int width = 0;
     int height = 0;
     int64_t captureUs = 0; // capture time on the clock of the machine that captured it
+    int64_t decodedUs = 0; // receiver: decoder output (local clock); 0 for local frames
+    bool repeated = false; // a screen source re-sent an unchanged picture (new timestamp, old content)
     uint32_t id = 0;
     std::vector<uint8_t> data;
 
@@ -46,6 +51,16 @@ public:
     VideoFramePtr latest(const QString& stream, uint64_t* generation = nullptr) const;
     void clear(const QString& stream);
 
+    // The renderer put |generation| of |stream| on screen (swap returned at
+    // |swapUs|). Feeds the display part of the latency breakdown.
+    void noteShown(const QString& stream, uint64_t generation, int64_t swapUs);
+    struct DisplayStats {
+        uint64_t shown = 0, superseded = 0; // superseded: replaced before it was ever shown
+        StageStats::Stage wait, total;      // decoded -> swap, capture -> swap (ms)
+        double shownFps = 0;                // new frames put on screen per second (recent)
+    };
+    DisplayStats displayStats(const QString& stream) const;
+
 signals:
     void frameAvailable(const QString& stream);
 
@@ -53,6 +68,10 @@ private:
     struct Slot {
         VideoFramePtr frame;
         uint64_t generation = 0;
+        uint64_t shownGeneration = 0;
+        uint64_t shown = 0, superseded = 0;
+        StageStats display{{"wait", "total"}};
+        std::deque<int64_t> shownAt; // recent swap times, for shownFps
     };
     mutable std::mutex m_;
     std::map<QString, Slot> slots_;

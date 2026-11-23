@@ -2,6 +2,8 @@
 
 #include <QLoggingCategory>
 
+#include <cmath>
+
 Q_LOGGING_CATEGORY(lcSession, "p2p.session")
 
 namespace p2p::app {
@@ -39,7 +41,23 @@ QString formatSend(const char* label, const video::VideoSendStream::Stats& v)
         .arg(v.rungSwitches)
         .arg(v.reopenMaxMs, 0, 'f', 1)
         .arg(v.framesSkipped)
-        .arg(QLatin1String(label));
+        .arg(QLatin1String(label)) +
+           (v.stages.isEmpty() ? QString() : QStringLiteral("\n     stages ms avg/p95: %1").arg(v.stages));
+}
+
+QString formatDisplay(const video::FrameHub::DisplayStats& d)
+{
+    if (d.shown == 0) return {};
+    const QString wait = std::isnan(d.wait.avg)
+                             ? QString()
+                             : QStringLiteral("wait %1/%2 | ").arg(d.wait.avg, 0, 'f', 1).arg(d.wait.p95, 0, 'f', 1);
+    return QStringLiteral("\n     display %1capture->screen %2/%3 ms | shown %4 (%6 fps) superseded %5")
+        .arg(wait)
+        .arg(d.total.avg, 0, 'f', 1)
+        .arg(d.total.p95, 0, 'f', 1)
+        .arg(d.shown)
+        .arg(d.superseded)
+        .arg(d.shownFps, 0, 'f', 1);
 }
 
 QString formatRecv(const char* label, const video::VideoReceiveStream::Stats& v)
@@ -68,7 +86,9 @@ QString formatRecv(const char* label, const video::VideoReceiveStream::Stats& v)
         .arg(v.assembler.retransmitsUseful)
         .arg(v.assembler.retransmitsReceived)
         .arg(v.assembler.nacked)
-        .arg(QLatin1String(label));
+        .arg(QLatin1String(label)) +
+           (v.stages.isEmpty() ? QString() : QStringLiteral("\n     stages ms avg/p95: %1").arg(v.stages)) +
+           formatDisplay(v.display);
 }
 } // namespace
 
@@ -276,7 +296,11 @@ QString MediaSession::statsText() const
     if (!audio_) return {};
     const auto t = transport_.stats();
     QString s = audio::AudioPipeline::format(audio_->stats());
-    if (videoSend_) s += formatSend("video", videoSend_->stats());
+    if (videoSend_) {
+        s += formatSend("video", videoSend_->stats());
+        // Self view: local capture -> on screen.
+        s += formatDisplay(video::FrameHub::instance().displayStats(QStringLiteral("local")));
+    }
     if (videoRecv_) s += formatRecv("video", videoRecv_->stats());
     if (screenSend_ && screenSend_->running()) s += formatSend("screen", screenSend_->stats());
     if (screenRecv_ && screenRecv_->stats().decoded > 0) s += formatRecv("screen", screenRecv_->stats());

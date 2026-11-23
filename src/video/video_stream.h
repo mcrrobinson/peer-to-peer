@@ -25,11 +25,12 @@ class MediaTransport;
 namespace p2p::video {
 
 struct VideoStreamConfig {
-    enum class Source { Camera, Pattern, Screen, None };
+    enum class Source { Camera, Pattern, Flash, Screen, None };
     enum class Fec { Off, Auto, Fixed };
     Source source = Source::Camera;
     CaptureConfig capture;             // camera, and the pattern's size / rate
     ScreenConfig screen;               // Source::Screen
+    QString flashLog;                  // Source::Flash: where its switch times go
     std::function<void(QString)> onSourceEnded; // the screen source stopped by itself
     int bitrateKbps = 12000;       // the maximum with congestion control, else fixed
     int minBitrateKbps = 300;
@@ -69,6 +70,10 @@ public:
         int rungKbps = 0, rungIndex = 0, rungCount = 0;
         double budgetKbps = 0, reopenMaxMs = 0;
         QString encoder, source;
+        // Latency breakdown, avg/p95 ms: source (capture -> handed to us:
+        // camera driver, MJPEG decode, screen convert), prep (scaling, rate
+        // control), encode (until the bitstream is out).
+        QString stages;
     };
 
     VideoSendStream(VideoStreamConfig cfg, media::StreamSelection sel, net::MediaTransport& t, uint8_t streamId,
@@ -115,6 +120,7 @@ private:
     SwsContext* sws_ = nullptr;
     VideoFrame scaledFrame_;
     double lastFecRate_ = 0;
+    double fecCap_ = 1.0; // auto FEC may only use the budget left above the current rung
     uint32_t frameId_ = 0;
     std::atomic<bool> forceKeyframe_{true};
     std::atomic<int64_t> skipQueueUs_{50'000}; // pacer backlog above which new frames are skipped
@@ -128,6 +134,7 @@ private:
     mutable std::mutex statsMutex_;
     Stats st_;
     double encodeSumMs_ = 0;
+    StageStats stages_{{"source", "prep", "encode"}};
     mutable uint64_t rateBytes_ = 0, rateFrames_ = 0;
     mutable int64_t rateAtUs_ = 0;
     mutable double kbps_ = 0, fps_ = 0;
@@ -142,6 +149,11 @@ public:
         uint64_t recoveredDecoded = 0; // frames that needed FEC or a resend
         double decodeAvgMs = 0;
         double latencyAvgMs = -1, latencyP95Ms = -1; // capture -> decoded (excl. display)
+        // Latency breakdown, avg/p95 ms: encode (sender capture -> encoded),
+        // send (-> first packet here: pacer + network), spread (first -> last
+        // packet or recovery), wait (complete -> decode start), decode.
+        QString stages;
+        FrameHub::DisplayStats display; // decoded -> on screen (GUI only)
         double kbps = 0, fps = 0;
         double pathLoss = 0; // last measured, before recovery
         int width = 0, height = 0;
@@ -196,6 +208,7 @@ private:
     mutable std::mutex statsMutex_;
     Stats st_;
     double decodeSumMs_ = 0;
+    StageStats stages_{{"encode", "send", "spread", "wait", "decode"}};
     std::deque<double> latencies_;
     mutable uint64_t rateBytes_ = 0, rateFrames_ = 0;
     mutable int64_t rateAtUs_ = 0;

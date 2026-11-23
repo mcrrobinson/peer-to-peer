@@ -1,5 +1,9 @@
 #include "app/video_view.h"
 
+#include "core/clock.h"
+
+#include <QQuickWindow>
+
 #include <QFile>
 #include <rhi/qrhi.h>
 #include <rhi/qshader.h>
@@ -31,6 +35,7 @@ struct Uniforms {
 
 class VideoRenderer : public QQuickRhiItemRenderer {
 public:
+    ~VideoRenderer() override { QObject::disconnect(swapConn_); }
     void initialize(QRhiCommandBuffer*) override;
     void synchronize(QQuickRhiItem* item) override;
     void render(QRhiCommandBuffer* cb) override;
@@ -52,6 +57,10 @@ private:
     uint64_t generation_ = 0;
     video::VideoFramePtr frame_;   // frame to show
     bool frameDirty_ = false;      // needs uploading
+    // Latency breakdown: the generation drawn in this frame, reported to
+    // the hub once the window's swap returns (render thread).
+    QMetaObject::Connection swapConn_;
+    uint64_t drawnGeneration_ = 0;
 };
 
 // ---------------------------------------------------------------- renderer
@@ -105,6 +114,13 @@ void VideoRenderer::ensureTextures(int w, int h)
 void VideoRenderer::synchronize(QQuickRhiItem* item)
 {
     auto* view = static_cast<VideoView*>(item);
+    if (!swapConn_ && item->window()) {
+        swapConn_ = QObject::connect(item->window(), &QQuickWindow::frameSwapped, [this] {
+            if (drawnGeneration_ == 0) return;
+            video::FrameHub::instance().noteShown(stream_, drawnGeneration_, nowUs());
+            drawnGeneration_ = 0;
+        });
+    }
     stream_ = view->stream();
     mirrored_ = view->mirrored();
     uint64_t gen = 0;
@@ -140,6 +156,7 @@ void VideoRenderer::render(QRhiCommandBuffer* cb)
         u->uploadTexture(yTex_.get(), QRhiTextureUploadDescription({0, 0, yDesc}));
         u->uploadTexture(uvTex_.get(), QRhiTextureUploadDescription({0, 0, uvDesc}));
         frameDirty_ = false;
+        drawnGeneration_ = generation_;
     }
 
     if (!ps_) {

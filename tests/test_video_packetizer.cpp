@@ -58,6 +58,7 @@ private slots:
     void headerRoundTrip()
     {
         FragmentHeader h{0xdeadbeef, 3, 9, 123456789012, FragmentHeader::kKeyframe, 2, 1920, 1080};
+        h.encodeDelay10Us = 4321;
         uint8_t b[FragmentHeader::kSize];
         h.write(b);
         auto r = FragmentHeader::read(b, sizeof(b));
@@ -70,6 +71,7 @@ private slots:
         QCOMPARE(r->codec, h.codec);
         QCOMPARE(r->width, h.width);
         QCOMPARE(r->height, h.height);
+        QCOMPARE(r->encodeDelay10Us, h.encodeDelay10Us);
         b[5] = 9; // index == count
         QVERIFY(!FragmentHeader::read(b, sizeof(b)));
         QVERIFY(!FragmentHeader::read(b, 5));

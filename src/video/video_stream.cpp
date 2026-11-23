@@ -176,6 +176,10 @@ bool VideoSendStream::start(QString* error)
             cfg_.source = VideoStreamConfig::Source::Pattern;
         }
     }
+    if (cfg_.source == VideoStreamConfig::Source::Flash) {
+        source_ = createFlashSource(c.width, c.height, c.fps, cfg_.flashLog);
+        if (!source_->start(onFrame, error)) return false;
+    }
     if (cfg_.source == VideoStreamConfig::Source::Pattern) {
         source_ = std::make_unique<TestPatternSource>(c.width, c.height, c.fps);
         if (!source_->start(onFrame, error)) return false;
@@ -247,6 +251,7 @@ const VideoFrame* VideoSendStream::scaled(const VideoFrame& f, int w, int h)
 
 void VideoSendStream::onFrame(std::shared_ptr<VideoFrame> f)
 {
+    const int64_t entryUs = nowUs();
     FrameHub::instance().publish(previewName_, f);
     {
         std::lock_guard l(statsMutex_);
@@ -289,6 +294,9 @@ void VideoSendStream::onFrame(std::shared_ptr<VideoFrame> f)
                                              .arg(budget, 0, 'f', 0);
             encoder_.reset();
         }
+        // FEC may only use what is left above the chosen rung: at the lowest
+        // rung, loss-driven FEC must not push the stream past the target.
+        fecCap_ = std::max(0.0, std::max(0.0, avail) * share_.load() / (ladder_->rung().kbps * 1000.0) - 1.0);
         {
             std::lock_guard l(statsMutex_);
             st_.budgetKbps = budget;
@@ -313,18 +321,23 @@ void VideoSendStream::onFrame(std::shared_ptr<VideoFrame> f)
     const int64_t t0 = nowUs();
     size_t bytes = 0, parity = 0;
     bool wasKey = false;
+    int64_t encodedUs = 0;
     double fecRate = 0;
     const uint8_t codecId = uint8_t(sel_.codec);
     const bool ok = encoder_->encode(*in, key, [&](const uint8_t* data, size_t size, bool isKey) {
         wasKey |= isKey;
         bytes += size;
+        if (!encodedUs) encodedUs = nowUs();
         PacketizeOptions opt;
+        opt.encodedUs = encodedUs;
         opt.extraFlags = sendingPattern_ ? FragmentHeader::kTestPattern : 0;
         opt.width = uint16_t(in->width);
         opt.height = uint16_t(in->height);
         switch (cfg_.fec) {
         case VideoStreamConfig::Fec::Off: break;
-        case VideoStreamConfig::Fec::Auto: opt.fecRate = autoFecRate(lossEstimate_.load(), isKey); break;
+        case VideoStreamConfig::Fec::Auto:
+            opt.fecRate = std::min(autoFecRate(lossEstimate_.load(), isKey), fecCap_);
+            break;
         case VideoStreamConfig::Fec::Fixed: opt.fecRate = cfg_.fecFixedRate; break;
         }
         fecRate = opt.fecRate;
@@ -372,6 +385,8 @@ void VideoSendStream::onFrame(std::shared_ptr<VideoFrame> f)
     st_.reportedLoss = lossEstimate_.load();
     lastFecRate_ = fecRate;
     encodeSumMs_ += ms;
+    stages_.add({double(entryUs - f->captureUs) / 1000.0, double(t0 - entryUs) / 1000.0,
+                 double(encodedUs - t0) / 1000.0});
     st_.encodeAvgMs = encodeSumMs_ / double(st_.encoded);
     st_.encodeMaxMs = std::max(st_.encodeMaxMs, ms);
 }
@@ -383,6 +398,7 @@ VideoSendStream::Stats VideoSendStream::stats() const
     updateRate(nowUs(), st_.bytes, st_.encoded, rateBytes_, rateFrames_, rateAtUs_, kbps_, fps_);
     s.kbps = kbps_;
     s.fps = fps_;
+    s.stages = stages_.format();
     return s;
 }
 
@@ -486,7 +502,9 @@ void VideoReceiveStream::decodeLoop()
         bool needKey = false;
         bool synced = false;
         int64_t grace = 0;
-        const int64_t rtt = std::max<int64_t>(rttUs_.load(), 0);
+        // Media-path RTT (it includes pacer and bottleneck queues), not just
+        // the control channel's: a resend can't come back sooner than that.
+        const int64_t rtt = std::max<int64_t>({rttUs_.load(), transport_.ccStats().srttUs, 0});
         FrameAssembler::NackPolicy policy;
         policy.retryUs = std::max<int64_t>(5'000, rtt * 3 / 2 + 2'000);
         {
@@ -532,7 +550,9 @@ void VideoReceiveStream::decodeLoop()
             }
             if (!out) continue;
             out->id = f.id;
-            out->captureUs = f.captureUs - clockOffsetUs_.load(); // into our clock
+            const int64_t offset = clockOffsetUs_.load();
+            out->captureUs = f.captureUs - offset; // into our clock
+            out->decodedUs = t1;
             const double latency = double(t1 - out->captureUs) / 1000.0;
 
             std::optional<uint32_t> code;
@@ -543,6 +563,13 @@ void VideoReceiveStream::decodeLoop()
             ++st_.decoded;
             if (f.recovered) ++st_.recoveredDecoded;
             decodeSumMs_ += double(t1 - t0) / 1000.0;
+            {
+                const bool enc = f.encodedUs != 0;
+                stages_.add({enc ? double(f.encodedUs - f.captureUs) / 1000.0 : NAN,
+                             enc ? double(f.firstArrivalUs - (f.encodedUs - offset)) / 1000.0 : NAN,
+                             double(f.completeUs - f.firstArrivalUs) / 1000.0, double(t0 - f.completeUs) / 1000.0,
+                             double(t1 - t0) / 1000.0});
+            }
             st_.decodeAvgMs = decodeSumMs_ / double(st_.decoded);
             st_.width = out->width;
             st_.height = out->height;
@@ -581,6 +608,8 @@ VideoReceiveStream::Stats VideoReceiveStream::stats() const
         std::nth_element(v.begin(), v.begin() + long(k), v.end());
         s.latencyP95Ms = v[k];
     }
+    s.stages = stages_.format();
+    s.display = FrameHub::instance().displayStats(hubName_);
     return s;
 }
 

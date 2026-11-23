@@ -111,11 +111,18 @@ Congestion control (phase 6), in `MediaTransport` because it sees every packet:
       intervals) and its frame is < 500 ms old. A second cause on the receiver: after a loss the
       assembler accepted (and could re-show / NACK) frames it had already released; it now keeps a
       floor at the lost frame (test `neverResyncsOnOldFramesAfterLoss`). 10/10 runs clean.
-      **Still open:** (f) the receiver's NACK retry spacing and grace use the control-channel RTT
-      (~0.25 ms on loopback), not the media srtt that includes pacer/bottleneck queues, so on a
-      queued link retries fire before a resend can arrive (only ~1/3–1/2 of resends useful);
-      (g) at the 300 kbps floor rung on a ~600 kbps link, loss-driven auto-FEC (up to 50%) plus
-      audio overflows the link and the call sits at ~50% loss.
+      (f) Fixed: the receiver's NACK retry spacing and grace used only the control-channel RTT
+      (~0.25 ms on loopback), so frames were declared lost (20 ms) before any resend could arrive;
+      now max(control RTT, the receiver's own media srtt). 2 Mbps / 20 ms / 2% loss, FEC off:
+      lost 46–59 → 0–9 frames per 21 s, resends useful 3% → ~97%, 44 → 60 fps; capture→decoded
+      43 → 52 ms (frames now wait for their resend instead of a PLI + keyframe). (g) Fixed: every
+      FEC block gets ≥ 1 parity fragment, so on small frames any FEC doubled the stream; at the
+      floor rung on a 600 kbps link that pinned the call at ~48% loss (audio ~2/3 concealed). Auto
+      FEC is now capped to the budget left above the current rung: 600 kbps → 0 drops, 42–48 ms,
+      no audio concealed; 1000 kbps, 2 Mbps and LAN unchanged. **Open:** at mid rungs the
+      ≥ 1-parity rounding still makes real FEC overhead larger than the displayed rate (e.g.
+      "fec 9%" ≈ 50% real at 941 kbps). A prototype spreading parity across small frames fixed
+      fixed-rate FEC but hurt 2%-loss runs under the old NACK timing; not retried since (f).
       Verified with real netem `bottleneck` + GUI (camera 1080p60 one way, pattern back):
       `--cc off` → 87–90% loss, video ~1 frame / 30 s, 0.4–1 s latency, ~40% audio concealed;
       `--cc on` → 59 fps both ways, p95 40–75 ms, audio <1% concealed, ~58 ms.
@@ -131,12 +138,18 @@ Congestion control (phase 6), in `MediaTransport` because it sees every packet:
       or hangup. Test `screenShareStartsStopsAndRestarts` (1080p pattern source). Verified in the
       GUI on GNOME Wayland (1920x1080 via the portal, both directions).
       **Deferred:** DMA-BUF zero-copy capture → phase 9 (SHM + swscale for now).
-- [ ] **8 AV1 + negotiation matrix** — SVT-AV1 RTC preset with screen-content tools, dav1d,
+- [ ] **8 AV1 + negotiation matrix** — *skipped for now (user, 2026-11-22); phase 9 next.* SVT-AV1 RTC preset with screen-content tools, dav1d,
       hardware AV1 where present; exercise every encoder/decoder pairing end to end.
 - [ ] **9 Latency work** — sub-frame slice send, zero-copy (V4L2/DMA-BUF→VA-API, VA-API→RHI),
       VA-API JPEG decode for the camera, low-latency present, native VA-API encoder (intra
       refresh, LTR) if not done earlier, Tambur-style streaming codes, glass-to-glass latency probe
       (`tools/latency_probe`) with per-stage breakdown and a WebRTC A/B.
+      *In progress.* Done: per-stage breakdown (sender source/prep/encode, receiver
+      encode/send/spread/wait/decode, display wait + capture→swap via `frameSwapped`),
+      `latency_probe` (screen-capture glass-to-glass; `--source-log` with `--video-source flash`
+      needs no camera). Measured 1080p60 loopback, flash source: created→on screen 26 ms median
+      remote, 8 ms self view; after-swap cost ≈ one compositor frame. Camera: source stage 40 ms
+      (25.5 ms driver timestamp→dequeue, 14.6 ms software MJPEG decode) — next: VA-API JPEG decode.
 - [ ] **10 macOS** — AVFoundation camera, ScreenCaptureKit, VideoToolbox (low-latency RC, HEVC),
       CoreAudio via miniaudio, codesign + camera/mic/screen entitlements. Platform splits exist
       (`camera_none.cpp`, `codec_probe_generic.cpp`, `audio_device_none.cpp`).

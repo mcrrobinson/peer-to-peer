@@ -38,6 +38,7 @@ void FragmentHeader::write(uint8_t* p) const
     putU16(p + 20, height);
     p[22] = fecParity;
     p[23] = fecBlock;
+    putU16(p + 24, encodeDelay10Us);
 }
 
 std::optional<FragmentHeader> FragmentHeader::read(const uint8_t* p, size_t len)
@@ -54,6 +55,7 @@ std::optional<FragmentHeader> FragmentHeader::read(const uint8_t* p, size_t len)
     h.height = getU16(p + 20);
     h.fecParity = p[22];
     h.fecBlock = p[23];
+    h.encodeDelay10Us = getU16(p + 24);
     if (h.count == 0) return std::nullopt;
     if (h.fecParity == 0) {
         if (h.index >= h.count) return std::nullopt;
@@ -85,6 +87,8 @@ size_t packetizeFrame(uint32_t frameId, int64_t captureUs, bool keyframe, uint8_
     h.flags = uint8_t((keyframe ? FragmentHeader::kKeyframe : 0) |
                       (opt.extraFlags & ~(FragmentHeader::kKeyframe | FragmentHeader::kRetransmit)));
     h.codec = codec;
+    if (opt.encodedUs > 0)
+        h.encodeDelay10Us = uint16_t(std::clamp<int64_t>((opt.encodedUs - captureUs) / 10, 0, 0xffff));
     h.width = opt.width;
     h.height = opt.height;
     if (opt.fecRate > 0) {
@@ -261,6 +265,7 @@ void FrameAssembler::complete(uint32_t id, Partial&& p, int64_t nowUs)
     f.height = p.first.height;
     f.codec = p.first.codec;
     f.captureUs = p.first.captureUs;
+    f.encodedUs = p.first.encodeDelay10Us ? p.first.captureUs + int64_t(p.first.encodeDelay10Us) * 10 : 0;
     f.firstArrivalUs = p.firstArrivalUs;
     f.completeUs = nowUs;
     f.recovered = p.recovered;

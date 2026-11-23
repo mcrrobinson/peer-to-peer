@@ -69,7 +69,7 @@ int main(int argc, char** argv)
     cli.addOptions({instanceOpt, nameOpt, portOpt, connectOpt, autoAcceptOpt, noDiscoveryOpt, headlessOpt,
                     exitAfterOpt, preferAv1Opt, audioSourceOpt, audioIoOpt, noApmOpt, audioBitrateOpt,
                     audioLowDelayOpt, periodOpt, simLossOpt, noMediaOpt, aecOpt, nsOpt, agcOpt});
-    QCommandLineOption videoSourceOpt("video-source", "Video to send: camera, pattern or none.", "src", "camera");
+    QCommandLineOption videoSourceOpt("video-source", "Video to send: camera, pattern, flash (for tools/latency_probe) or none.", "src", "camera");
     QCommandLineOption cameraOpt("camera", "V4L2 camera device.", "device", "/dev/video0");
     QCommandLineOption videoSizeOpt("video-size", "Capture size WxH.", "WxH", "1920x1080");
     QCommandLineOption videoFpsOpt("video-fps", "Capture frame rate.", "fps", "60");
@@ -93,6 +93,8 @@ int main(int argc, char** argv)
                                    "100");
     QCommandLineOption simCeOpt("sim-ce", "Simulated L4S marking: CE above this queue delay, ms (0 = off).", "ms",
                                 "0");
+    QCommandLineOption flashLogOpt("flash-log", "With --video-source flash: append switch times here.", "file",
+                                   "flash-log.txt");
     QCommandLineOption shareScreenOpt("share-screen", "Start sharing the screen when the call connects: text or motion.",
                                       "mode");
     QCommandLineOption screenSourceOpt("screen-source",
@@ -102,7 +104,7 @@ int main(int argc, char** argv)
                                         "kbps", "10000");
     cli.addOptions({videoSourceOpt, cameraOpt, videoSizeOpt, videoFpsOpt, videoBitrateOpt, cameraFormatOpt, fecOpt,
                     noNackOpt, simBurstOpt, audioFecOpt, ccOpt, minBitrateOpt, simRateOpt, simDelayOpt, simQueueOpt,
-                    simCeOpt, shareScreenOpt, screenSourceOpt, screenBitrateOpt});
+                    simCeOpt, flashLogOpt, shareScreenOpt, screenSourceOpt, screenBitrateOpt});
     cli.process(*app);
 
     if (!p2p::crypto::init()) {
@@ -149,6 +151,7 @@ int main(int argc, char** argv)
     const QString vsrc = cli.value(videoSourceOpt);
     if (vsrc == "camera") video.source = VSource::Camera;
     else if (vsrc == "pattern") video.source = VSource::Pattern;
+    else if (vsrc == "flash") video.source = VSource::Flash;
     else if (vsrc == "none") video.source = VSource::None;
     else {
         std::fprintf(stderr, "unknown --video-source %s\n", qPrintable(vsrc));
@@ -190,6 +193,7 @@ int main(int argc, char** argv)
     sim.delayUs = int64_t(std::max(0.0, cli.value(simDelayOpt).toDouble()) * 1000);
     sim.queueUs = int64_t(std::max(1.0, cli.value(simQueueOpt).toDouble()) * 1000);
     sim.ceThresholdUs = int64_t(std::max(0.0, cli.value(simCeOpt).toDouble()) * 1000);
+    video.flashLog = cli.value(flashLogOpt);
 
     // Screen share: same transport / recovery settings as the camera.
     auto& screen = opts.mediaConfig.screen;

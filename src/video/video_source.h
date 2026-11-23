@@ -46,6 +46,11 @@ public:
     virtual void requestFrame() {}
 };
 
+// Black / white frames that switch at random 0.5-0.9 s intervals, for the
+// latency probe (tools/latency_probe --source-log): each switch's capture
+// time is appended to |logPath| as "<captureUs> <0|1>".
+std::unique_ptr<VideoSource> createFlashSource(int width, int height, int fps, const QString& logPath);
+
 // V4L2 camera (Linux). macOS AVFoundation capture arrives with the macOS port.
 std::unique_ptr<VideoSource> createCameraSource(const CaptureConfig& cfg);
 
