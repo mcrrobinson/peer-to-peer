@@ -34,6 +34,9 @@ struct ScreenConfig {
     int maxWidth = 3840;      // larger captures are scaled down to fit
     int maxHeight = 2160;
     QString restoreTokenFile; // portal restore token (skip the picker next time); empty = don't persist
+    // macOS: capture the main display without the system picker (scripted
+    // tests; needs Screen Recording access). Otherwise the picker asks.
+    bool mainDisplay = false;
 };
 
 // Produces NV12 frames on its own thread. The callback runs on that thread
@@ -60,9 +63,9 @@ std::unique_ptr<VideoSource> createFlashSource(int width, int height, int fps, c
 // V4L2 camera (Linux). macOS AVFoundation capture arrives with the macOS port.
 std::unique_ptr<VideoSource> createCameraSource(const CaptureConfig& cfg);
 
-// Screen capture: xdg-desktop-portal ScreenCast + PipeWire (Linux); the
-// macOS port adds ScreenCaptureKit. start() returns at once: the user
-// picks a screen or window in the portal dialog and frames follow. Must be
+// Screen capture: xdg-desktop-portal ScreenCast + PipeWire (Linux),
+// ScreenCaptureKit with the system's content picker (macOS). start()
+// returns at once: the user picks a screen or window and frames follow. Must be
 // created, started and stopped on a thread with a Qt event loop (D-Bus).
 // |onEnded| runs (any thread) when sharing stops by itself: the dialog was
 // cancelled, the user stopped it from the desktop, or the stream failed.

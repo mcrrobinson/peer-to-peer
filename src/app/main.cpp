@@ -108,7 +108,13 @@ int main(int argc, char** argv)
     QCommandLineOption shareScreenOpt("share-screen", "Start sharing the screen when the call connects: text or motion.",
                                       "mode");
     QCommandLineOption screenSourceOpt("screen-source",
+#ifdef Q_OS_MACOS
+                                       "Screen to share: portal (pick a screen/window), display (the main display, "
+                                       "no picker; needs Screen Recording access), pattern (test) or none.",
+                                       "src",
+#else
                                        "Screen to share: portal (pick a screen/window), pattern (test) or none.", "src",
+#endif
                                        "portal");
     QCommandLineOption screenBitrateOpt("screen-bitrate", "Screen share bitrate in kbps (the maximum with --cc on).",
                                         "kbps", "10000");
@@ -218,6 +224,12 @@ int main(int argc, char** argv)
     screen.bitrateKbps = std::clamp(cli.value(screenBitrateOpt).toInt(), 300, 200000);
     const QString ssrc = cli.value(screenSourceOpt);
     if (ssrc == "portal") screen.source = VSource::Screen;
+#ifdef Q_OS_MACOS
+    else if (ssrc == "display") {
+        screen.source = VSource::Screen;
+        screen.screen.mainDisplay = true;
+    }
+#endif
     else if (ssrc == "pattern") screen.source = VSource::Pattern; // capture.* gives its size and rate
     else if (ssrc == "none") screen.source = VSource::None;
     else {

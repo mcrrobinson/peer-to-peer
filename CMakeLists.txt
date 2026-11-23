@@ -107,11 +107,12 @@ if(CMAKE_SYSTEM_NAME STREQUAL "Linux")
 elseif(APPLE)
     target_sources(p2pcore PRIVATE src/video/codec_probe_macos.cpp src/video/camera_avfoundation.mm
                                    src/video/cv_image.h src/video/cv_image.cpp
-                                   src/video/screen_none.cpp
+                                   src/video/screen_sck.mm
                                    src/video/hevc_vt_encoder.cpp)
-    set_source_files_properties(src/video/camera_avfoundation.mm PROPERTIES COMPILE_OPTIONS "-fobjc-arc")
+    set_source_files_properties(src/video/camera_avfoundation.mm src/video/screen_sck.mm PROPERTIES COMPILE_OPTIONS "-fobjc-arc")
     target_link_libraries(p2pcore PRIVATE "-framework VideoToolbox" "-framework CoreMedia" "-framework CoreVideo"
-                                          "-framework CoreFoundation" "-framework AVFoundation" "-framework Foundation")
+                                          "-framework CoreFoundation" "-framework AVFoundation" "-framework Foundation"
+                                          "-framework ScreenCaptureKit" "-framework CoreGraphics")
 else()
     target_sources(p2pcore PRIVATE src/video/codec_probe_generic.cpp src/video/camera_none.cpp
                                    src/video/screen_none.cpp)
@@ -182,6 +183,11 @@ if(P2P_BUILD_TESTS)
         set_source_files_properties(tests/test_camera_macos.mm PROPERTIES COMPILE_OPTIONS "-fobjc-arc")
         target_link_libraries(test_camera_macos PRIVATE p2pcore Qt6::Test "-framework AVFoundation" "-framework Foundation")
         add_test(NAME test_camera_macos COMMAND test_camera_macos)
+        # The main display (skips unless Screen Recording access was already granted).
+        qt_add_executable(test_screen_macos tests/test_screen_macos.mm)
+        set_source_files_properties(tests/test_screen_macos.mm PROPERTIES COMPILE_OPTIONS "-fobjc-arc")
+        target_link_libraries(test_screen_macos PRIVATE p2pcore Qt6::Test "-framework CoreGraphics")
+        add_test(NAME test_screen_macos COMMAND test_screen_macos)
         # Renderer on Metal: imported VideoToolbox frames vs uploaded ones (opens a window).
         qt_add_executable(test_video_view tests/test_video_view.cpp src/app/video_view.h src/app/video_view.cpp
                           src/app/metal_nv12_import.h src/app/metal_nv12_import.mm)

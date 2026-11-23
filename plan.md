@@ -371,6 +371,19 @@ Congestion control (phase 6), in `MediaTransport` because it sees every packet:
             CPU path; `DownsamplingMode` changes nothing). Tests: `test_camera_macos` (real camera,
             skips unless access already granted), `test_vt_encoder::takesGpuFrames`. 13/13 suites.
             To do: glass-to-glass with `latency_probe` (needs the camera pointed at the screen).
+      - [x] 4 ScreenCaptureKit (2026-11-23). `screen_sck.mm`: the system picker
+            (SCContentSharingPicker: display, window or app) — no Screen Recording permission needed;
+            `--screen-source display` captures the main display without it (needs the permission;
+            missing → CGRequestScreenCaptureAccess prompt + error). 420v BT.709, scaled to fit
+            `maxWidth/maxHeight` by SCK (scalesToFit, aspect kept), rate cap via
+            minimumFrameInterval; frames stay CVPixelBuffers (GPU into the encoder and the Metal
+            view). Idle screens send nothing: last picture repeated ~1/s and on `requestFrame()`, as
+            on PipeWire. A new pick from the menu bar switches the running stream. Results (GUI pair,
+            display 2940×1714 px): motion → 1852×1080 58 fps, enc 11.2 ms, capture→decoded 14 ms,
+            capture→screen 22 ms; text → 2940×1714 30 fps, enc ~18 ms. `test_screen_macos` (main
+            display) skips without the permission — not granted here, so not yet run. Not checked:
+            declining the picker (one try: no cancel callback seen; left as is), menu-bar Stop,
+            the picker in `--headless` (no NSApplication).
 
 Also outstanding: active A/V sync (latencies are reported only); the AV1 software encoder bug below.
 
