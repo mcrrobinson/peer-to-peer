@@ -141,11 +141,11 @@ Congestion control (phase 6), in `MediaTransport` because it sees every packet:
       **Deferred:** DMA-BUF zero-copy capture → phase 9 (SHM + swscale for now).
 - [ ] **8 AV1 + negotiation matrix** — *skipped for now (user, 2026-11-22); phase 9 next.* SVT-AV1 RTC preset with screen-content tools, dav1d,
       hardware AV1 where present; exercise every encoder/decoder pairing end to end.
-- [ ] **9 Latency work** — sub-frame slice send, zero-copy (V4L2/DMA-BUF→VA-API, VA-API→RHI),
+- [x] **9 Latency work** — sub-frame slice send, zero-copy (V4L2/DMA-BUF→VA-API, VA-API→RHI),
       VA-API JPEG decode for the camera, low-latency present, native VA-API encoder (intra
       refresh, LTR) if not done earlier, Tambur-style streaming codes, glass-to-glass latency probe
       (`tools/latency_probe`) with per-stage breakdown and a WebRTC A/B.
-      *In progress.* Done: per-stage breakdown (sender source/prep/encode, receiver
+      *Done 2026-11-23 (sub-frame slice send dropped).* Covered: per-stage breakdown (sender source/prep/encode, receiver
       encode/send/spread/wait/decode, display wait + capture→swap via `frameSwapped`),
       `latency_probe` (screen-capture glass-to-glass; `--source-log` with `--video-source flash`
       needs no camera). Measured 1080p60 loopback, flash source: created→on screen 26 ms median
@@ -260,6 +260,24 @@ Congestion control (phase 6), in `MediaTransport` because it sees every packet:
       its tail by dropping ~6 frames/s at the sender (those never count in latency); hybrid sends
       every frame at +72 ms p95. Also fixed: a stale call test that expected every loss to cost
       a keyframe (flaky since the native encoder recovers without one).
+    - WebRTC A/B (`tools/webrtc_ab/`: Chrome loopback page — two RTCPeerConnections, host UDP,
+      stock settings — sending a 1920x1080 canvas redrawn at 60 fps that flashes like
+      `--video-source flash`, switch times on CLOCK_MONOTONIC via a local server, so
+      `latency_probe --source-log` measures both the same way). Chrome 158, same sitting,
+      45 s per row, frame created → on screen, median (p95):
+      | p2pcall HEVC (native VA-API), 1080p60 | 2.2 (11.6), repeat 0.5 (8.8) |
+      | p2pcall, 720p60                       | −3.1 (5.9) |
+      | Chrome VP8 (default), 1080p60         | 61.1 (83.4), repeat 55.8 (85.5) |
+      | Chrome H264, 1080p60                  | 53.4 (68.8) |
+      | Chrome AV1, 1080p60                   | 53.0 (71.4) |
+      | Chrome, canvas → <video>, no WebRTC   | 30.9 (47.1), repeat 24.4 (41.1) |
+      The probe's absolute numbers run low (p2pcall's own capture→swap is 8.8 ms at 1080p), so
+      read differences only: p2pcall is ~50–60 ms ahead end to end; of that, ~25–30 ms is
+      Chrome's canvas capture + video element display (the control) and ~25–30 ms WebRTC
+      itself (getStats: encode 7.7 ms, jitter buffer 9–11 ms, decode 0.6–5 ms; Chrome chose
+      1080p60, no quality limit, no loss). Caveats: loopback only, no impairment, trivially
+      compressible content, one browser; a camera-sourced call has its own capture path in
+      place of the canvas.
 - [ ] **10 macOS** — AVFoundation camera, ScreenCaptureKit, VideoToolbox (low-latency RC, HEVC),
       CoreAudio via miniaudio, codesign + camera/mic/screen entitlements. Platform splits exist
       (`camera_none.cpp`, `codec_probe_generic.cpp`, `audio_device_none.cpp`).
