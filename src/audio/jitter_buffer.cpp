@@ -81,6 +81,16 @@ void JitterBuffer::updateJitter(const EncodedFrame& f)
     baseTarget_ = std::clamp(frames, cfg_.minTargetFrames, cfg_.maxTargetFrames);
 }
 
+void JitterBuffer::discardTo(uint32_t seq)
+{
+    while (playhead_ < seq) {
+        st_.dropped += q_.erase(playhead_);
+        ++playhead_;
+    }
+    if (underrunPending_ && underrunSeq_ < playhead_) underrunPending_ = false;
+    excessPulls_ = 0;
+}
+
 JitterBuffer::Result JitterBuffer::pull()
 {
     Result r;
@@ -90,8 +100,13 @@ JitterBuffer::Result JitterBuffer::pull()
         started_ = true;
     }
 
-    // Last-resort trim if we've been sitting far above target for a while.
-    if (levelFrames() > targetFrames() + cfg_.hardTrimExcessFrames) {
+    // Gross backlog (audio that queued up before playout started, or a
+    // stall's worth arriving at once): playing it would put the call
+    // seconds behind, so keep only the newest target's worth.
+    if (levelFrames() > targetFrames() + cfg_.flushExcessFrames) {
+        discardTo(maxSeq_ - uint32_t(targetFrames()) + 1);
+    } else if (levelFrames() > targetFrames() + cfg_.hardTrimExcessFrames) {
+        // Last-resort trim if we've been sitting far above target for a while.
         if (++excessPulls_ >= cfg_.excessPullsBeforeDrop) {
             q_.erase(playhead_);
             ++playhead_;

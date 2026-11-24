@@ -22,7 +22,8 @@ struct EncodedFrame {
 // small margin), so on a quiet LAN it settles at a single frame. A frame
 // that was waited for and then arrived late temporarily raises the target
 // (a lost one does not); sustained excess depth is trimmed by dropping a
-// frame. When a frame is missing but a later one has arrived, the
+// frame, and a gross backlog (at start, or after a stall) is discarded at
+// once down to the newest target's worth. When a frame is missing but a later one has arrived, the
 // caller is told to conceal it and is handed that later frame so it can use
 // Opus in-band FEC (LBRR) or DRED before falling back to PLC.
 //
@@ -40,6 +41,9 @@ public:
         // resampler; hard frame drops only kick in for gross excess.
         int hardTrimExcessFrames = 6;
         int excessPullsBeforeDrop = 20;   // ~200 ms above that before trimming
+        // Beyond this excess, skip straight to the newest target's worth
+        // instead of draining (which takes ~10 s per second of backlog).
+        int flushExcessFrames = 20;
         int pullsPerBoostDecay = 500;     // ~5 s without underrun lowers the boost
         int maxBoost = 6;
     };
@@ -75,6 +79,7 @@ public:
 
 private:
     void updateJitter(const EncodedFrame& f);
+    void discardTo(uint32_t seq);
 
     Config cfg_;
     std::map<uint32_t, EncodedFrame> q_;

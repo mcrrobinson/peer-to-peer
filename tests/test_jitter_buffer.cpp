@@ -140,6 +140,42 @@ private slots:
         QVERIFY(jb.levelFrames() <= jb.targetFrames() + 6);
     }
 
+    void startupBacklogIsDiscarded()
+    {
+        // 3 s of steadily paced audio queues up before playout starts (the
+        // first LAN call on the Mac): play from the newest, not the oldest.
+        JitterBuffer jb;
+        for (uint32_t s = 0; s < 300; ++s) jb.insert(frame(s, int64_t(s) * kFrameUs));
+        const int target = jb.targetFrames();
+        auto r = jb.pull();
+        QCOMPARE(r.action, Action::Decode);
+        QCOMPARE(r.frame.seq, uint32_t(300 - target));
+        QCOMPARE(jb.stats().dropped, uint64_t(300 - target));
+        QCOMPARE(jb.levelFrames(), target - 1);
+    }
+
+    void stallBacklogIsDiscarded()
+    {
+        // Steady flow, then a 1 s stall whose audio all arrives at once. It
+        // reads as jitter (the target rises), but the excess beyond that goes
+        // in one step rather than draining for seconds.
+        JitterBuffer jb;
+        uint32_t next = 0;
+        for (; next < 300; ++next) {
+            jb.insert(frame(next, int64_t(next) * kFrameUs));
+            jb.pull();
+        }
+        for (int i = 0; i < 100; ++i) jb.pull(); // underruns hold the playhead
+        const int64_t burstAt = int64_t(next + 100) * kFrameUs;
+        for (int i = 0; i < 100; ++i, ++next) jb.insert(frame(next, burstAt));
+        const int target = jb.targetFrames();
+        auto r = jb.pull();
+        QCOMPARE(r.action, Action::Decode);
+        QCOMPARE(r.frame.seq, next - uint32_t(target));
+        QCOMPARE(jb.levelFrames(), target - 1);
+        QCOMPARE(jb.stats().dropped, uint64_t(100 - target));
+    }
+
     void duplicatesIgnored()
     {
         JitterBuffer jb;
