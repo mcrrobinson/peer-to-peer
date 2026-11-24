@@ -133,6 +133,7 @@ bool MediaSession::start(const crypto::SessionKeys& keys, const QHostAddress& re
     transport_.setCongestionControl(cc, cfg_.video.congestionControl);
 
     audio_ = std::make_unique<audio::AudioPipeline>(cfg_.audio, transport_);
+    audio_->setClockOffsetUs(clockOffsetUs_);
     audio_->attach();
     if (sendCamera && cfg_.video.source != video::VideoStreamConfig::Source::None) {
         videoSend_ = std::make_unique<video::VideoSendStream>(cfg_.video, *sendCamera, transport_,
@@ -142,6 +143,7 @@ bool MediaSession::start(const crypto::SessionKeys& keys, const QHostAddress& re
     if (recvCamera) {
         videoRecv_ = std::make_unique<video::VideoReceiveStream>(*recvCamera, transport_, net::wire::kCamera,
                                                                  QStringLiteral("remote"), cfg_.video.nack);
+        videoRecv_->setClockOffsetUs(clockOffsetUs_);
         videoRecv_->attach();
     }
     if (sendScreen && cfg_.screen.source != video::VideoStreamConfig::Source::None) {
@@ -156,6 +158,7 @@ bool MediaSession::start(const crypto::SessionKeys& keys, const QHostAddress& re
     if (recvScreen) {
         screenRecv_ = std::make_unique<video::VideoReceiveStream>(*recvScreen, transport_, net::wire::kScreen,
                                                                   QStringLiteral("remote-screen"), cfg_.screen.nack);
+        screenRecv_->setClockOffsetUs(clockOffsetUs_);
         screenRecv_->attach();
     }
     transport_.start();
@@ -265,6 +268,7 @@ void MediaSession::stop()
 
 void MediaSession::setClockOffsetUs(int64_t us)
 {
+    clockOffsetUs_ = us;
     if (audio_) audio_->setClockOffsetUs(us);
     if (videoRecv_) videoRecv_->setClockOffsetUs(us);
     if (screenRecv_) screenRecv_->setClockOffsetUs(us);

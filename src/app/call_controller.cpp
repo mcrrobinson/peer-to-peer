@@ -415,6 +415,8 @@ void CallController::startMedia()
         return;
     }
     QString err;
+    // Before start(): playout begins inside it, and latency stats need the offset.
+    media_->setClockOffsetUs(int64_t(channel_->clockOffsetMs() * 1000.0));
     std::optional<media::StreamSelection> sendCam, recvCam, sendScreen, recvScreen;
     if (sendSel_) {
         sendCam = sendSel_->camera;
@@ -431,7 +433,6 @@ void CallController::startMedia()
         return;
     }
     media_->setMuted(micMuted_);
-    media_->setClockOffsetUs(int64_t(channel_->clockOffsetMs() * 1000.0));
     if (channel_->rttMs() >= 0) media_->setRttUs(int64_t(channel_->rttMs() * 1000.0));
     appendLog(QStringLiteral("media flowing: udp %1 -> %2:%3")
                   .arg(media_->localPort())

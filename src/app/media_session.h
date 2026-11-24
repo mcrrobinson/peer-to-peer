@@ -53,6 +53,8 @@ public:
     bool sharingScreen() const { return screenSend_ && screenSend_->running(); }
     void clearRemoteScreen(); // the peer stopped sharing
 
+    // Also remembered for a later start(), so the first frames of a call
+    // are measured against the real offset.
     void setClockOffsetUs(int64_t us);
     void setRttUs(int64_t us);
     void setMuted(bool m);
@@ -78,6 +80,7 @@ private:
     std::function<void(QString)> screenEnded_;
     void updateBudgetShares();
     bool started_ = false;
+    int64_t clockOffsetUs_ = 0;
 };
 
 } // namespace p2p::app
